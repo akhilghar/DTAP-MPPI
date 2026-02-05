@@ -1,0 +1,17 @@
+[project]
+name = "dtap-mppi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "gymnasium>=1.2.3",
+    "matplotlib>=3.10.8",
+    "moviepy>=2.2.1",
+    "mujoco>=3.4.0",
+    "notebook>=7.5.3",
+    "numba>=0.63.1",
+    "numpy>=2.3.5",
+    "pandas>=3.0.0",
+    "torch>=2.10.0",
+]
