@@ -5,4 +5,4 @@ DTAP-MPPI (Dynamic Terrain-Aware Payload MPPI) is an augmented control algorithm
 This repository requires the following before usage:
 * An NVIDIA GPU supported by Numba
 * CUDA Toolkit
-* uv (Refer to https://docs.astral.sh/uv/getting-started/installation/ for installation)# DTAP-MPPI
+* uv (Refer to https://docs.astral.sh/uv/getting-started/installation/ for installation)
