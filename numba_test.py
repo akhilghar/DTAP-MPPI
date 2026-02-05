@@ -1,5 +1,6 @@
 from numba import vectorize, cuda
 import numpy as np
+import time
 
 # Define a CUDA vectorized function
 @vectorize(['float32(float32, float32)'], target='cuda')
@@ -12,5 +13,8 @@ A = np.ones(N, dtype=np.float32)
 B = np.ones(N, dtype=np.float32)
 
 # Numba automatically manages memory transfer and kernel execution
+start = time.time()
 C = add_vectors_cuda(A, B)
+end = time.time()
+print(f"Time taken: {end - start:.4f} seconds")
 print(C)
