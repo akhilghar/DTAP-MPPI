@@ -1,87 +1,142 @@
-from controllers.mpc_baseline import MPCBaseline, MPCConfig
-from environments.staticEnv import StaticEnvironment
+# main.py
 import numpy as np
 import matplotlib.pyplot as plt
+from controllers.mppi_baseline import MPPIBaseline, MPPIConfig
+from dynamics.cuda_dynamics import bicycle_dynamics
+from dynamics.native_dynamics import bicycle_dynamics_host
+from environments.staticEnv import StaticEnvironment
 
-def bicycle_dynamics(state: np.ndarray, control: np.ndarray, dt: float) -> np.ndarray:
+# ============================================================================
+# Setup
+# ============================================================================
+
+# Create environment with obstacles
+env = StaticEnvironment(bounds=(-2, 12, -2, 12), robot_radius=0.3)
+env.add_circle_obstacle(np.array([5.0, 5.0]), radius=1.0)
+env.add_circle_obstacle(np.array([7.0, 3.0]), radius=0.8)
+env.add_circle_obstacle(np.array([3.0, 8.0]), radius=0.6)
+
+# Configure MPPI
+config = MPPIConfig(
+    num_samples=10000,
+    horizon=40,
+    dt=0.05,
+    lambda_=5.0,
     
-    px, py, theta, v = state
-    a, delta = control
-
-    L = 2.5
-
-    px_dot = v * np.cos(theta)
-    py_dot = v * np.sin(theta)
-    theta_dot = v / L * np.tan(delta)
-    v_dot = a
-
-    x_next = np.array([
-        px + px_dot * dt,
-        py + py_dot * dt,
-        theta + theta_dot * dt,
-        v + v_dot * dt
-    ])
-    return x_next
-
-def main():
-
-    env = StaticEnvironment(bounds=(-2, 12, -2, 12), robot_radius=0.3)
-    env.add_circle_obstacle(np.array([5.0, 5.0]), radius=1.0)
-    env.add_circle_obstacle(np.array([7.0, 3.0]), radius=0.8)
-    env.add_rectangle_obstacle(np.array([3.0, 8.0]), width=2.0, height=1.5)
+    # Cost weights
+    Q=np.diag([10.0, 10.0, 2.0, 2.0]),  # Penalize position more than heading/velocity
+    Qf=np.diag([50.0, 50.0, 5.0, 5.0]),  # Strong terminal cost
+    R=np.diag([0.5, 0.1]),  # Small control cost
     
-    config = MPCConfig(
-        horizon=20,
-        dt=0.1,
-        control_dim=2,
-        state_dim=4,
-        Q=np.eye(4),
-        R=np.eye(2),
-        Qf=np.eye(4) * 10,
-        u_min=np.array([-1, -1]),
-        u_max=np.array([1, 1])
-    )
-
-    mpc = MPCBaseline(config, bicycle_dynamics, env)
+    # Obstacle avoidance
+    Q_obs=100.0,
+    d_safe=1.0,  # Stay 1m away from obstacles
     
-    # Initial state and reference trajectory
-    x0 = np.array([0, 0, 0, 0])
-    x_goal = np.array([10, 10, 0, 0])
-    U = np.zeros((config.max_iterations, config.control_dim))
-    X = np.zeros((config.max_iterations + 1, config.state_dim))
-    T = np.arange(config.max_iterations) * config.dt
-    X[0] = x0
+    # Dynamics
+    dynamics_params=np.array([2.5]),  # wheelbase = 2.5m
+    
+    # Control limits
+    u_min=np.array([-3.0, -np.pi/3]),  # max braking, max left turn
+    u_max=np.array([2.0, np.pi/3]),     # max accel, max right turn
+    
+    # Sampling
+    noise_sigma=np.array([0.5, 0.2]),  # acceleration noise, steering noise
+)
 
-    for i in range(config.max_iterations):
-        # Request a safe control from the MPC (require safety)
-        u, is_safe = mpc.get_control(X[i], x_goal, require_safe=True)
-        
-        if not is_safe:
-            print(f"WARNING: Unsafe trajectory detected at iteration {i}.")
-        else:
-            print(f"Safe trajectory found at iteration {i}.")
+# Create MPPI controller
+mppi = MPPIBaseline(config, bicycle_dynamics, environment=env)
 
-        U[i] = u
-        X[i+1] = bicycle_dynamics(X[i], u, config.dt)
+# ============================================================================
+# Simulate
+# ============================================================================
 
-        if np.linalg.norm(X[i+1][:2] - x_goal[:2]) < 0.5:
-            print(f"Goal reached at iteration {i}.")
-            break
+x0 = np.array([0.0, 0.0, 0.0, 0.0])  # Start at origin, zero velocity
+x_goal = np.array([10.0, 10.0, 0.0, 0.0])  # Goal at (10,10), zero velocity
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
-    env.visualize(ax=ax1)
-    ax1.plot(X[:i+1, 0], X[:i+1, 1], 'b.-', label='Trajectory')
-    ax1.plot(x_goal[0], x_goal[1], 'ro', label='Goal')
-    ax1.set_title('MPC Trajectory')
-    ax1.legend()
+trajectory = [x0.copy()]
+controls = []
+num_steps = 200
 
-    ax2.plot(T[:i], U[:i, 0], 'r.-', label='Acceleration')
-    ax2.plot(T[:i], U[:i, 1], 'g.-', label='Steering')
-    ax2.set_title('Control Inputs')
-    ax2.legend()
+x = x0.copy()
 
-    plt.tight_layout()
-    plt.show()
+print("Running MPPI simulation...")
+for step in range(num_steps):
+    # Get control (returns (u_opt, is_safe))
+    u, is_safe = mppi.get_control(x, x_goal)
+    
+    # Apply control (using simple integration - in practice, use actual dynamics)
+    # Use host bicycle dynamics implementation
+    x_next = bicycle_dynamics_host(x, u, config.dt, config.dynamics_params)
+    
+    x = x_next
+    trajectory.append(x.copy())
+    controls.append(u.copy())
+    
+    # Check if reached goal
+    if np.linalg.norm(x[:2] - x_goal[:2]) < 0.5:
+        print(f"Reached goal at step {step}")
+        break
+    
+    if step % 20 == 0:
+        print(f"Step {step}: pos=({x[0]:.2f}, {x[1]:.2f}), v={x[3]:.2f}")
 
-if __name__ == "__main__":
-    main()
+trajectory = np.array(trajectory)
+controls = np.array(controls)
+
+print(f"Simulation complete: {len(trajectory)} steps")
+
+# ============================================================================
+# Visualize
+# ============================================================================
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+
+# Plot 1: Trajectory
+ax1 = axes[0, 0]
+env.visualize(ax=ax1, show_bounds=True)
+ax1.plot(trajectory[:, 0], trajectory[:, 1], 'b-', linewidth=2, label='Trajectory')
+ax1.plot(x0[0], x0[1], 'go', markersize=12, label='Start')
+ax1.plot(x_goal[0], x_goal[1], 'r*', markersize=15, label='Goal')
+ax1.legend()
+ax1.set_title('MPPI Trajectory with Obstacle Avoidance')
+ax1.grid(True, alpha=0.3)
+
+# Plot 2: Controls
+ax2 = axes[0, 1]
+time = np.arange(len(controls)) * config.dt
+ax2.plot(time, controls[:, 0], label='Acceleration', linewidth=2)
+ax2.plot(time, controls[:, 1], label='Steering', linewidth=2)
+ax2.axhline(config.u_max[0], color='r', linestyle='--', alpha=0.5, label='Limits')
+ax2.axhline(config.u_min[0], color='r', linestyle='--', alpha=0.5)
+ax2.axhline(config.u_max[1], color='orange', linestyle='--', alpha=0.5)
+ax2.axhline(config.u_min[1], color='orange', linestyle='--', alpha=0.5)
+ax2.set_xlabel('Time (s)')
+ax2.set_ylabel('Control')
+ax2.legend()
+ax2.grid(True)
+ax2.set_title('Control Inputs')
+
+# Plot 3: State evolution
+ax3 = axes[1, 0]
+ax3.plot(time[:len(trajectory)-1], trajectory[:-1, 2], label='Heading θ')
+ax3.plot(time[:len(trajectory)-1], trajectory[:-1, 3], label='Velocity v')
+ax3.set_xlabel('Time (s)')
+ax3.set_ylabel('State')
+ax3.legend()
+ax3.grid(True)
+ax3.set_title('State Evolution')
+
+# Plot 4: Distance to goal
+ax4 = axes[1, 1]
+dist_to_goal = np.linalg.norm(trajectory[:, :2] - x_goal[:2], axis=1)
+ax4.plot(time[:len(trajectory)-1], dist_to_goal[:-1], linewidth=2)
+ax4.set_xlabel('Time (s)')
+ax4.set_ylabel('Distance to Goal (m)')
+ax4.grid(True)
+ax4.set_title('Convergence to Goal')
+
+plt.tight_layout()
+plt.savefig('mppi_result.png', dpi=150)
+plt.show()
+
+print("Visualization saved to mppi_result.png")

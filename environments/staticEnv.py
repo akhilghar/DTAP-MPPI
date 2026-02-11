@@ -81,6 +81,86 @@ class StaticEnvironment:
     def clear_obstacles(self) -> None:
         """Remove all obstacles"""
         self.obstacles.clear()
+
+    def get_obstacle_data(self):
+        """
+        Get obstacle data in a format suitable for GPU kernels.
+        
+        Returns:
+            dict: Contains structured data for each obstacle type:
+                - 'circles': dict with 'positions' (N_circles, 2) and 'radii' (N_circles,)
+                - 'rectangles': dict with 'positions' (N_rects, 2), 'widths', 'heights', 'angles'
+                - 'polygons': dict with 'vertices_list' (list of (N_i, 2) arrays) and 'num_vertices' (list of vertex counts)
+                - 'num_obstacles': total number of obstacles
+                - 'obstacle_types': list of ObstacleType enums in same order as self.obstacles
+        """
+        circles = {'positions': [], 'radii': []}
+        rectangles = {'positions': [], 'widths': [], 'heights': [], 'angles': []}
+        polygons = {'vertices_list': [], 'num_vertices': []}
+        obstacle_types = []
+        
+        for obstacle in self.obstacles:
+            obstacle_types.append(obstacle.type)
+            
+            if obstacle.type == ObstacleType.CIRCLE:
+                circles['positions'].append(obstacle.position)
+                circles['radii'].append(obstacle.radius)
+                
+            elif obstacle.type == ObstacleType.RECTANGLE:
+                rectangles['positions'].append(obstacle.position)
+                rectangles['widths'].append(obstacle.width)
+                rectangles['heights'].append(obstacle.height)
+                rectangles['angles'].append(obstacle.angle)
+                
+            elif obstacle.type == ObstacleType.POLYGON:
+                polygons['vertices_list'].append(obstacle.vertices)
+                polygons['num_vertices'].append(len(obstacle.vertices))
+        
+        # Convert lists to numpy arrays where applicable
+        result = {
+            'num_obstacles': len(self.obstacles),
+            'obstacle_types': obstacle_types,
+            'circles': {
+                'positions': np.array(circles['positions'], dtype=np.float32) if circles['positions'] else np.empty((0, 2), dtype=np.float32),
+                'radii': np.array(circles['radii'], dtype=np.float32) if circles['radii'] else np.empty((0,), dtype=np.float32),
+                'count': len(circles['radii'])
+            },
+            'rectangles': {
+                'positions': np.array(rectangles['positions'], dtype=np.float32) if rectangles['positions'] else np.empty((0, 2), dtype=np.float32),
+                'widths': np.array(rectangles['widths'], dtype=np.float32) if rectangles['widths'] else np.empty((0,), dtype=np.float32),
+                'heights': np.array(rectangles['heights'], dtype=np.float32) if rectangles['heights'] else np.empty((0,), dtype=np.float32),
+                'angles': np.array(rectangles['angles'], dtype=np.float32) if rectangles['angles'] else np.empty((0,), dtype=np.float32),
+                'count': len(rectangles['widths'])
+            },
+            'polygons': {
+                'vertices_list': polygons['vertices_list'],
+                'num_vertices': np.array(polygons['num_vertices'], dtype=np.int32) if polygons['num_vertices'] else np.empty((0,), dtype=np.int32),
+                'count': len(polygons['num_vertices']),
+                'vertices_flat': self._flatten_polygon_vertices(polygons['vertices_list']),
+                'starts': self._compute_polygon_starts(polygons['num_vertices']),
+                'lengths': np.array(polygons['num_vertices'], dtype=np.int32) if polygons['num_vertices'] else np.empty((0,), dtype=np.int32)
+            }
+        }
+        
+        return result
+    
+    def _flatten_polygon_vertices(self, vertices_list):
+        """Flatten list of polygon vertex arrays into a single (N_total, 2) array"""
+        if not vertices_list:
+            return np.empty((0, 2), dtype=np.float32)
+        flat_vertices = np.vstack(vertices_list).astype(np.float32)
+        return flat_vertices
+    
+    def _compute_polygon_starts(self, num_vertices):
+        """Compute start indices for each polygon in the flattened vertex array"""
+        if not num_vertices:
+            return np.empty((0,), dtype=np.int32)
+        starts = np.zeros(len(num_vertices), dtype=np.int32)
+        cumsum = 0
+        for i, n in enumerate(num_vertices):
+            starts[i] = cumsum
+            cumsum += n
+        return starts
     
     def check_collision(self, position: np.ndarray) -> bool:
         """
