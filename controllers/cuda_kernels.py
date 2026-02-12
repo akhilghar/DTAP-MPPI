@@ -122,7 +122,7 @@ def cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
                 circle_positions, circle_radii, num_circles,
                 rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
                 poly_vertices, poly_starts, poly_lengths, num_polys,
-                d_safe, Q_obs, robot_radius, num_samples, horizon, state_dim, control_dim):
+                d_safe, Q_obs, robot_radius, num_samples, horizon, state_dim, control_dim, bounds):
     
     idx = cuda.grid(1)
     
@@ -165,6 +165,16 @@ def cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
                     dist = distance_to_polygon(px, py, poly_vertices, start, length)
                     if dist < d_safe:
                         cost += Q_obs * (d_safe - dist + robot_radius)
+            
+            # Boundary cost
+            if px < bounds[0] + robot_radius:
+                cost += Q_obs**2 * (bounds[0] + robot_radius - px)
+            if px > bounds[1] - robot_radius:
+                cost += Q_obs**2 * (px - (bounds[1] - robot_radius))
+            if py < bounds[2] + robot_radius:
+                cost += Q_obs**2 * (bounds[2] + robot_radius - py)
+            if py > bounds[3] - robot_radius:
+                cost += Q_obs**2 * (py - (bounds[3] - robot_radius))
 
         # Terminal state cost
         x_final = trajectories[idx, horizon]
@@ -197,3 +207,69 @@ def normalize_weights_kernel(weights, normalized_weights, num_samples):
             normalized_weights[idx] = weights[idx] / sum_weights
         else:
             normalized_weights[idx] = 1.0 / num_samples  # Avoid division by zero, assign equal weights
+
+
+@cuda.jit
+def min_distance_kernel(trajectories, min_dists,
+                        circle_positions, circle_radii, num_circles,
+                        rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
+                        poly_vertices, poly_starts, poly_lengths, num_polys,
+                        robot_radius, num_samples, horizon):
+    idx = cuda.grid(1)
+    if idx < num_samples:
+        min_d = 1e9
+        # iterate over trajectory timesteps
+        for t in range(horizon + 1):
+            px = trajectories[idx, t, 0]
+            py = trajectories[idx, t, 1]
+
+            # circles
+            for c in range(num_circles):
+                d = distance_to_circle(px, py, circle_positions[c, 0], circle_positions[c, 1], circle_radii[c]) - robot_radius
+                if d < min_d:
+                    min_d = d
+
+            # rectangles
+            for r in range(num_rects):
+                d = distance_to_rectangle(px, py, rect_positions[r, 0], rect_positions[r, 1], rect_widths[r], rect_heights[r]) - robot_radius
+                if d < min_d:
+                    min_d = d
+
+            # polygons
+            for p in range(num_polys):
+                start = poly_starts[p]
+                length = poly_lengths[p]
+                if is_in_polygon(px, py, poly_vertices, start, length):
+                    d = -1.0
+                else:
+                    d = distance_to_polygon(px, py, poly_vertices, start, length) - robot_radius
+                if d < min_d:
+                    min_d = d
+
+        min_dists[idx] = min_d
+
+
+@cuda.jit
+def expected_trajectory_kernel(trajectories, weights, out_traj, num_samples, horizon, state_dim):
+    tid = cuda.grid(1)
+    total = (horizon + 1) * state_dim
+    if tid < total:
+        t = tid // state_dim
+        s = tid % state_dim
+        acc = 0.0
+        for i in range(num_samples):
+            acc += weights[i] * trajectories[i, t, s]
+        out_traj[t, s] = acc
+
+
+@cuda.jit
+def expected_controls_kernel(samples, weights, out_controls, num_samples, horizon, control_dim):
+    tid = cuda.grid(1)
+    total = horizon * control_dim
+    if tid < total:
+        t = tid // control_dim
+        u = tid % control_dim
+        acc = 0.0
+        for i in range(num_samples):
+            acc += weights[i] * samples[i, t, u]
+        out_controls[t, u] = acc
