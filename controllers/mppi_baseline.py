@@ -152,24 +152,51 @@ class MPPIBaseline:
 
         obstacles = self._get_obstacle_data()
 
-        # Circles
-        d_obs_circles_positions = cuda.to_device(np.array(obstacles['circles']['positions'], dtype=np.float32))
-        d_obs_circles_radii = cuda.to_device(np.array(obstacles['circles']['radii'], dtype=np.float32))
-        d_obs_circles_count = int(obstacles['circles']['count'])
+        # -------- Circles --------
+        circles = obstacles['circles']
+        circle_count = circles['count']
 
-        # Rectangles
-        d_obs_rects_positions = cuda.to_device(np.array(obstacles['rectangles']['positions'], dtype=np.float32))
-        d_obs_rects_width = cuda.to_device(np.array(obstacles['rectangles']['widths'], dtype=np.float32))
-        d_obs_rects_height = cuda.to_device(np.array(obstacles['rectangles']['heights'], dtype=np.float32))
-        d_obs_rects_angles = cuda.to_device(np.array(obstacles['rectangles']['angles'], dtype=np.float32))
-        d_obs_rects_count = int(obstacles['rectangles']['count'])
+        if circle_count > 0:
+            d_obs_circles_positions = cuda.to_device(circles['positions'])
+            d_obs_circles_radii = cuda.to_device(circles['radii'])
+        else:
+            d_obs_circles_positions = cuda.to_device(np.zeros((1,2), dtype=np.float32))
+            d_obs_circles_radii = cuda.to_device(np.zeros(1, dtype=np.float32))
 
-        # Polygons: use flattened vertices, starts and lengths
-        # 'vertices_flat' is (N_total, 2), 'starts' is int32 array, 'lengths' is int32 array
-        d_obs_polys_vertices = cuda.to_device(np.array(obstacles['polygons']['vertices_flat'], dtype=np.float32))
-        d_obs_polys_starts = cuda.to_device(np.array(obstacles['polygons']['starts'], dtype=np.int32))
-        d_obs_polys_lengths = cuda.to_device(np.array(obstacles['polygons']['lengths'], dtype=np.int32))
-        d_obs_polys_count = int(obstacles['polygons']['count'])
+        d_obs_circles_count = int(circle_count)
+
+        # -------- Rectangles --------
+        rects = obstacles['rectangles']
+        rect_count = rects['count']
+
+        if rect_count > 0:
+            d_obs_rects_positions = cuda.to_device(rects['positions'])
+            d_obs_rects_width = cuda.to_device(rects['widths'])
+            d_obs_rects_height = cuda.to_device(rects['heights'])
+            d_obs_rects_angles = cuda.to_device(rects['angles'])
+        else:
+            d_obs_rects_positions = cuda.to_device(np.zeros((1,2), dtype=np.float32))
+            d_obs_rects_width = cuda.to_device(np.zeros(1, dtype=np.float32))
+            d_obs_rects_height = cuda.to_device(np.zeros(1, dtype=np.float32))
+            d_obs_rects_angles = cuda.to_device(np.zeros(1, dtype=np.float32))
+
+        d_obs_rects_count = int(rect_count)
+
+        # -------- Polygons --------
+        polys = obstacles['polygons']
+        poly_count = polys['count']
+
+        if poly_count > 0:
+            d_obs_polys_vertices = cuda.to_device(polys['vertices_flat'])
+            d_obs_polys_starts = cuda.to_device(polys['starts'])
+            d_obs_polys_lengths = cuda.to_device(polys['lengths'])
+        else:
+            d_obs_polys_vertices = cuda.to_device(np.zeros((1,2), dtype=np.float32))
+            d_obs_polys_starts = cuda.to_device(np.zeros(1, dtype=np.int32))
+            d_obs_polys_lengths = cuda.to_device(np.zeros(1, dtype=np.int32))
+
+        d_obs_polys_count = int(poly_count)
+
 
         robot_radius = self.environment.robot_radius
 
@@ -186,7 +213,7 @@ class MPPIBaseline:
             d_obs_circles_positions, d_obs_circles_radii, d_obs_circles_count,
             d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count, 
             d_obs_polys_vertices, d_obs_polys_starts, d_obs_polys_lengths, d_obs_polys_count,
-            robot_radius, self.config.Q_obs, self.config.d_safe,
+            self.config.d_safe, self.config.Q_obs, robot_radius,
             self.config.num_samples, self.config.horizon, self.config.state_dim, self.config.control_dim, self.environment.bounds
         )
 
