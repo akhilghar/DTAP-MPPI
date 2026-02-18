@@ -35,9 +35,9 @@ env.add_obstacle(
     Obstacle(position=[8.0, 2.0], radius=1.6, velocity=[0.5, 0.3])
 )
 
-env.add_obstacle(
-    Obstacle(position=[8.0, 8.0], radius=0.5, velocity=[-1.0, -0.2])
-)
+# env.add_obstacle(
+#    Obstacle(position=[0.0, 8.0], radius=0.5, velocity=[-1.0, -0.2])
+#)
 
 # ============================================================================
 # Configure MPPI
@@ -51,30 +51,30 @@ model_md = model.metadata
 state_dim = model_md["state_dim"]
 control_dim = model_md["control_dim"]
 
+print("State Dimensions: ", state_dim)
+
 max_deg = 60.0
 if state_dim == 4:
     Q_mod=np.diag([10.0, 10.0, 2.0, 2.0])
     Qf_mod=np.diag([50.0, 50.0, 5.0, 5.0])
     umin_mod = np.array([-3.0, -max_deg*np.pi/180])
     umax_mod = np.array([3.0, max_deg*np.pi/180])
-    noise_mod = np.array([0.5, 0.2])
+    noise_mod = np.array([0.6, 0.25])
     ctrl_label_1 = "Acceleration"
     ctrl_label_2 = "Steering Angle"
     x0 = np.array([0.0, 0.0, 0.0, 0.0])
     x_goal = np.array([10.0, 10.0, 0.0, 0.0])
 
 else:
-    Q_mod=np.diag([10.0, 10.0, 2.0])
+    Q_mod=np.diag([8.0, 8.0, 1.5])
     Qf_mod=np.diag([50.0, 50.0, 5.0])
-    umin_mod = np.array([-3.0, -3.0])
-    umax_mod = np.array([3.0, 3.0])
-    noise_mod = np.array([0.5, 0.5])
-    x0 = np.array([0.0, 0.0, 0.0])
-    x_goal = np.array([0.0, 10.0, 0.0])
+    umin_mod = np.array([-4.0, -4.0])
+    umax_mod = np.array([4.0, 4.0])
+    noise_mod = np.array([0.7, 0.7])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([0.0, 0.0, 0.0])
-    x_goal = np.array([10.0, 10.0, 0.0])
+    x0 = np.array([10.0, 0.0, -np.pi])
+    x_goal = np.array([0.0, 10.0, 0.0])
 
 
 config = MPPIConfig(
@@ -131,6 +131,10 @@ for step in range(num_steps):
 
     # --- Apply dynamics ---
     x = model.cpu(x, u, config.dt, config.dynamics_params)
+
+    if env.check_for_collision(x[:2]):
+        print("FATAL: Robot has been killed by the environment. Terminating simulation.")
+        break
 
     trajectory.append(x.copy())
     controls.append(u.copy())

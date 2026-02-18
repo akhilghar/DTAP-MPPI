@@ -96,7 +96,7 @@ class DeterministicEnv:
         
         for obs in self.obstacles:
             dist = np.linalg.norm(position[:2] - obs.position)
-            if dist <= obs.radius + self.robot_radius:
+            if dist <= obs.radius + self.robot_radius - 0.05:
                 return True
             
         return False
