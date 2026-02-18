@@ -2,8 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from controllers.mppi_baseline import MPPIBaseline, MPPIConfig
-from dynamics.cuda_dynamics import bicycle_dynamics
-from dynamics.native_dynamics import bicycle_dynamics_host
+from dynamics.models import DYNAMICS_REGISTRY
 from environments.staticEnv import StaticEnvironment
 import time
 
@@ -20,42 +19,72 @@ env.add_rectangle_obstacle(np.array([9.0, 1.0]), width=1.5, height=0.5, angle=np
 env.add_polygon_obstacle(np.array([[2.0, 1.5], [4.0, 1.0], [3.0, 3.0], [2.0, 3.0]]))  # Square obstacle
 
 # Configure MPPI
+
+model_name = "differential_drive"
+model = DYNAMICS_REGISTRY[model_name]
+
+model_md = model.metadata
+state_dim = model_md["state_dim"]
+control_dim = model_md["control_dim"]
+
+max_deg = 60.0
+if state_dim == 4:
+    Q_mod=np.diag([10.0, 10.0, 2.0, 2.0])
+    Qf_mod=np.diag([50.0, 50.0, 5.0, 5.0])
+    umin_mod = np.array([-3.0, -max_deg*np.pi/180])
+    umax_mod = np.array([3.0, max_deg*np.pi/180])
+    noise_mod = np.array([0.5, 0.2])
+    ctrl_label_1 = "Acceleration"
+    ctrl_label_2 = "Steering Angle"
+    x0 = np.array([0.0, 0.0, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0, 0.0])
+
+else:
+    Q_mod=np.diag([10.0, 10.0, 2.0])
+    Qf_mod=np.diag([50.0, 50.0, 5.0])
+    umin_mod = np.array([-3.0, -3.0])
+    umax_mod = np.array([3.0, 3.0])
+    noise_mod = np.array([0.3, 0.3])
+    x0 = np.array([0.0, 0.0, 0.0])
+    x_goal = np.array([0.0, 10.0, 0.0])
+    ctrl_label_1 = "Left Wheel Velocity"
+    ctrl_label_2 = "Right Wheel Velocity"
+    x0 = np.array([0.0, 0.0, np.pi/4])
+    x_goal = np.array([10.0, 10.0, 0.0])
+
 max_deg = 72.0 # maximum steering angle in degrees
 config = MPPIConfig(
     num_samples=10000,
     horizon=40,
     dt=0.05,
-    lambda_=2.0,
+    lambda_=5.0,
     
     # Cost weights
-    Q=np.diag([10.0, 10.0, 2.0, 2.0]),  # Penalize position more than heading/velocity
-    Qf=np.diag([50.0, 50.0, 5.0, 5.0]),  # Strong terminal cost
-    R=np.diag([0.5, 0.1]),  # Small control cost
+    Q=Q_mod,  # Penalize position more than heading/velocity
+    Qf=Qf_mod,  # Strong terminal cost
+    R=np.diag([0.1, 0.1]),  # Small control cost
     
     # Obstacle avoidance
     Q_obs=100.0,
     d_safe=env.robot_radius+0.05,  # Stay 0.05m away from obstacles
     
     # Dynamics
-    dynamics_params=np.array([2.5]),  # wheelbase = 2.5m
+    dynamics_params=np.array([1.0]),  # wheelbase = 2.5m
     
     # Control limits
-    u_min=np.array([-3.0, -max_deg*np.pi/180]),  # max braking, max left turn
-    u_max=np.array([3.0, max_deg*np.pi/180]),     # max accel, max right turn
+    u_min=umin_mod,  # max braking, max left turn
+    u_max=umax_mod,     # max accel, max right turn
     
     # Sampling
-    noise_sigma=np.array([0.5, 0.2]),  # acceleration noise, steering noise
+    noise_sigma=noise_mod,  # acceleration noise, steering noise
 )
 
 # Create MPPI controller
-mppi = MPPIBaseline(config, bicycle_dynamics, environment=env)
+mppi = MPPIBaseline(config, model.gpu, environment=env)
 
 # ============================================================================
 # Simulate
 # ============================================================================
-
-x0 = np.array([0.0, 0.0, np.pi/6, 0.0])  # Start at origin, zero velocity
-x_goal = np.array([7, 5, 0.0, 0.0])  # Goal at (10,10), zero velocity
 
 trajectory = [x0.copy()]
 controls = []
@@ -71,7 +100,7 @@ for step in range(num_steps):
     
     # Apply control (using simple integration - in practice, use actual dynamics)
     # Use host bicycle dynamics implementation
-    x_next = bicycle_dynamics_host(x, u, config.dt, config.dynamics_params)
+    x_next = model.cpu(x, u, config.dt, config.dynamics_params)
     
     x = x_next
     trajectory.append(x.copy())
@@ -84,7 +113,7 @@ for step in range(num_steps):
     
     if step % 20 == 0:
         end = time.time()
-        print(f"Step {step}: pos=({x[0]:.2f}, {x[1]:.2f}), v={x[3]:.2f}, safe={is_safe}, time={end-start:.3f}s")
+        print(f"Step {step}: pos=({x[0]:.2f}, {x[1]:.2f}), safe={is_safe}, time={end-start:.3f}s")
 
 trajectory = np.array(trajectory)
 controls = np.array(controls)
@@ -124,8 +153,13 @@ ax2.set_title('Control Inputs')
 
 # Plot 3: State evolution
 ax3 = axes[1, 0]
-ax3.plot(time[:len(trajectory)-1], trajectory[:-1, 2], label='Heading θ')
-ax3.plot(time[:len(trajectory)-1], trajectory[:-1, 3], label='Velocity v')
+ax3.plot(time, trajectory[:-1, 2], label='Heading θ')
+if state_dim == 4:
+        ax3.plot(time, trajectory[:-1, 3], label='Velocity v')
+else:
+    v_avg = 0.5*controls[:,0] + 0.5*controls[:,1]
+    ax3.plot(time, v_avg, label='Velocity')
+
 ax3.set_xlabel('Time (s)')
 ax3.set_ylabel('State')
 ax3.legend()
@@ -135,14 +169,14 @@ ax3.set_title('State Evolution')
 # Plot 4: Distance to goal
 ax4 = axes[1, 1]
 dist_to_goal = np.linalg.norm(trajectory[:, :2] - x_goal[:2], axis=1)
-ax4.plot(time[:len(trajectory)-1], dist_to_goal[:-1], linewidth=2)
+ax4.plot(time, dist_to_goal[:-1], linewidth=2)
 ax4.set_xlabel('Time (s)')
 ax4.set_ylabel('Distance to Goal (m)')
 ax4.grid(True)
 ax4.set_title('Convergence to Goal')
 
 plt.tight_layout()
-filename = f'media/mppi_result_{x_goal[0]}_{x_goal[1]}_{x0[2]:.2f}.png'
+filename = f'media/mppi_result_{model_name}_{x_goal[0]}_{x_goal[1]}_{x0[2]:.2f}_static.png'
 plt.savefig(filename, dpi=150)
 plt.show()
 

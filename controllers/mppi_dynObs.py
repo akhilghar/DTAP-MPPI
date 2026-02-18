@@ -52,7 +52,7 @@ class MPPIConfig:
         if self.u_max is None:
             self.u_max = np.ones(self.control_dim)
         if self.noise_sigma is None:
-            self.noise_sigma = 0.7 * np.ones(self.control_dim)
+            self.noise_sigma = 0.5 * np.ones(self.control_dim)
         if self.dynamics_params is None:
             self.dynamics_params = np.array([1.0], dtype=np.float32)  # Default parameters for dynamics (e.g., wheelbase)
 

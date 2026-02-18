@@ -8,6 +8,8 @@ class Obstacle:
         self.velocity = np.asarray(velocity, dtype=np.float32)
         self.radius = radius
 
+        self.area = np.pi*radius**2
+
     def move(self, dt: float):
         self.position += self.velocity*dt
 
@@ -120,6 +122,43 @@ class DeterministicEnv:
         
         return min_distance
     
+    def obstacle_collisions(self):
+        n_obs = len(self.obstacles)
+
+        for i in range(n_obs):
+            for j in range(i+1, n_obs):
+
+                obs_i = self.obstacles[i]
+                obs_j = self.obstacles[j]
+
+                diff = obs_i.position - obs_j.position
+                dist = np.linalg.norm(diff)
+                min_dist = obs_i.radius + obs_j.radius
+
+                if dist < min_dist and dist > 1e-6:
+                    normal = diff/dist
+
+                    v_relative = obs_i.velocity - obs_j.velocity
+                    v_normal = np.dot(v_relative, normal)
+
+                    if v_normal < 0:
+                        restitution = 0.6 # Inelasticity
+
+                        impulse = -(1+restitution)*v_normal
+                        impulse /= (1.0/(obs_i.area) + 1.0/(obs_j.area))
+                        
+                        impulse_vector = impulse*normal
+
+                        obs_i.velocity += impulse_vector/obs_i.area
+                        obs_j.velocity -= impulse_vector/obs_j.area
+
+                    overlap = min_dist - dist
+                    if overlap > 0:
+                        correction = overlap/((1.0/obs_i.area) + (1.0/obs_j.area))*normal
+
+                        obs_i.position += correction/obs_i.area
+                        obs_j.position -= correction/obs_j.area
+    
     def predict_obstacle_trajectories(self, horizon, dt):
         if len(self.obstacles) == 0:
             return np.zeros((horizon, 0, 2), dtype=np.float32)
@@ -169,6 +208,10 @@ class DeterministicEnv:
                 for obs in self.obstacles
             ]
         }
+    
+    def step(self, dt: float):
+        self.move_obstacles(dt)
+        self.obstacle_collisions()
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Rectangle

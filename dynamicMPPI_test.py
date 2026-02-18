@@ -5,8 +5,7 @@ import math
 import matplotlib.pyplot as plt
 import time
 from controllers.mppi_dynObs import MPPIDynObs, MPPIConfig
-from dynamics.cuda_dynamics import bicycle_dynamics
-from dynamics.native_dynamics import bicycle_dynamics_host
+from dynamics.models import DYNAMICS_REGISTRY
 from environments.dynamicEnv_deterministic import DeterministicEnv, Obstacle
 
 # ============================================================================
@@ -29,14 +28,54 @@ env.add_obstacle(
 )
 
 env.add_obstacle(
-    Obstacle(position=[3.0, 1.0], radius=0.6, velocity=[-1.0, 0.9])
+    Obstacle(position=[3.0, 1.0], radius=0.4, velocity=[-1.0, 0.9])
+)
+
+env.add_obstacle(
+    Obstacle(position=[8.0, 2.0], radius=1.6, velocity=[0.5, 0.3])
+)
+
+env.add_obstacle(
+    Obstacle(position=[8.0, 8.0], radius=0.5, velocity=[-1.0, -0.2])
 )
 
 # ============================================================================
 # Configure MPPI
 # ============================================================================
 
-max_deg = 50.0
+# Define function used, reference this function exclusively
+model_name = "differential_drive"
+model = DYNAMICS_REGISTRY[model_name]
+
+model_md = model.metadata
+state_dim = model_md["state_dim"]
+control_dim = model_md["control_dim"]
+
+max_deg = 60.0
+if state_dim == 4:
+    Q_mod=np.diag([10.0, 10.0, 2.0, 2.0])
+    Qf_mod=np.diag([50.0, 50.0, 5.0, 5.0])
+    umin_mod = np.array([-3.0, -max_deg*np.pi/180])
+    umax_mod = np.array([3.0, max_deg*np.pi/180])
+    noise_mod = np.array([0.5, 0.2])
+    ctrl_label_1 = "Acceleration"
+    ctrl_label_2 = "Steering Angle"
+    x0 = np.array([0.0, 0.0, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0, 0.0])
+
+else:
+    Q_mod=np.diag([10.0, 10.0, 2.0])
+    Qf_mod=np.diag([50.0, 50.0, 5.0])
+    umin_mod = np.array([-3.0, -3.0])
+    umax_mod = np.array([3.0, 3.0])
+    noise_mod = np.array([0.5, 0.5])
+    x0 = np.array([0.0, 0.0, 0.0])
+    x_goal = np.array([0.0, 10.0, 0.0])
+    ctrl_label_1 = "Left Wheel Velocity"
+    ctrl_label_2 = "Right Wheel Velocity"
+    x0 = np.array([0.0, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0])
+
 
 config = MPPIConfig(
     num_samples=10000,
@@ -44,8 +83,8 @@ config = MPPIConfig(
     dt=0.05,
     lambda_=10.0, # increase temperature for smoother trajectory
 
-    Q=np.diag([10.0, 10.0, 2.0, 2.0]),
-    Qf=np.diag([50.0, 50.0, 5.0, 5.0]),
+    Q=Q_mod,
+    Qf=Qf_mod,
     R=np.diag([0.1, 0.1]),
 
     Q_obs=150.0,
@@ -53,20 +92,19 @@ config = MPPIConfig(
 
     dynamics_params=np.array([1.0]),
 
-    u_min=np.array([-3.0, -max_deg*np.pi/180]),
-    u_max=np.array([3.0, max_deg*np.pi/180]),
+    u_min=umin_mod,
+    u_max=umax_mod,
 
-    noise_sigma=np.array([0.5, 0.2]),
+    noise_sigma=noise_mod,
 )
 
-mppi = MPPIDynObs(config, bicycle_dynamics, environment=env)
+# print(config)
+
+mppi = MPPIDynObs(config, model.gpu, environment=env)
 
 # ============================================================================
 # Simulation
 # ============================================================================
-
-x0 = np.array([0.0, 0.0, np.pi/2, 0.0])
-x_goal = np.array([8.0, 0.0, 0.0, 0.0])
 
 trajectory = [x0.copy()]
 controls = []
@@ -74,14 +112,14 @@ controls = []
 obstacle_history = []
 
 x = x0.copy()
-num_steps = 200
+num_steps = 300
 
 print("Running Dynamic MPPI Simulation...")
 
 for step in range(num_steps):
 
     # --- Step environment first (obstacles move) ---
-    env.move_obstacles(config.dt)
+    env.step(config.dt)
     obstacle_history.append(
         np.array([obs.position.copy() for obs in env.obstacles])
     )
@@ -92,7 +130,7 @@ for step in range(num_steps):
     end = time.time()
 
     # --- Apply dynamics ---
-    x = bicycle_dynamics_host(x, u, config.dt, config.dynamics_params)
+    x = model.cpu(x, u, config.dt, config.dynamics_params)
 
     trajectory.append(x.copy())
     controls.append(u.copy())
@@ -104,7 +142,7 @@ for step in range(num_steps):
 
     if step % 20 == 0:
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
-              f"v={x[3]:.2f}, safe={is_safe}, "
+              f"safe={is_safe}, "
               f"time={end-start:.3f}s")
 
 trajectory = np.array(trajectory)
@@ -179,7 +217,8 @@ ani = animation.FuncAnimation(
 )
 
 plt.show()
-ani.save(f"media/mppi_animation_{x_goal[0]}_{x_goal[1]}_{x0[2]:.2f}_det.gif", writer="pillow", fps=1/config.dt)
+ani.save(f"media/mppi_animation_{model_name}_{x_goal[0]}_{x_goal[1]}_{x0[2]:.2f}_det.gif", writer="pillow", fps=1/config.dt)
+print("Saved animated GIF of Robot.")
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 12))
 
@@ -205,8 +244,8 @@ ax1.grid(True)
 # Plot 2: Controls
 ax2 = axes[0, 1]
 time_vec = np.arange(len(controls)) * config.dt
-ax2.plot(time_vec, controls[:, 0], label='Acceleration')
-ax2.plot(time_vec, controls[:, 1], label='Steering')
+ax2.plot(time_vec, controls[:, 0], label='Control Input 1')
+ax2.plot(time_vec, controls[:, 1], label='Control Input 2')
 ax2.legend()
 ax2.grid(True)
 ax2.set_title("Control Inputs")
@@ -214,7 +253,11 @@ ax2.set_title("Control Inputs")
 # Plot 3: States
 ax3 = axes[1, 0]
 ax3.plot(time_vec, trajectory[:-1, 2], label='Heading')
-ax3.plot(time_vec, trajectory[:-1, 3], label='Velocity')
+if state_dim == 4:
+    ax3.plot(time_vec, trajectory[:-1, 3], label='Velocity')
+else:
+    v_avg = 0.5*controls[:,0] + 0.5*controls[:,1]
+    ax3.plot(time_vec, v_avg, label='Velocity')
 ax3.legend()
 ax3.grid(True)
 ax3.set_title("State Evolution")
@@ -227,8 +270,9 @@ ax4.set_title("Distance to Goal")
 ax4.grid(True)
 
 plt.tight_layout()
-filename = f'media/mppi_result_{x_goal[0]}_{x_goal[1]}_{x0[2]:.2f}_dynDet.png'
+filename = f'media/mppi_result_{model_name}_{x_goal[0]}_{x_goal[1]}_{x0[2]:.2f}_dynDet.png'
 plt.savefig(filename, dpi=150)
 plt.show()
 
+print("Visualization Saved.")
 mppi.free_gpu_buffers()
