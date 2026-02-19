@@ -93,6 +93,9 @@ class MPPIDynObs:
 
         self.u_nominal = np.zeros((config.horizon, config.control_dim), dtype=np.float32)
 
+        self.base_covariance = self.config.noise_sigma.copy()
+        self.current_covariance = self.config.noise_sigma.copy()
+
         self._allocate_gpu_memory()
 
     def _allocate_gpu_memory(self):
@@ -122,7 +125,7 @@ class MPPIDynObs:
     
     # Sample control perturbations and add to nominal control sequence
     def _generate_samples(self):
-        noise = np.random.normal(0, self.config.noise_sigma, size=(self.config.num_samples, self.config.horizon, self.config.control_dim)).astype(np.float32)
+        noise = np.random.normal(0, self.current_covariance, size=(self.config.num_samples, self.config.horizon, self.config.control_dim)).astype(np.float32)
         samples = self.u_nominal + noise
         samples = np.clip(samples, self.config.u_min, self.config.u_max)
         return samples
@@ -157,10 +160,11 @@ class MPPIDynObs:
         circle_count = circles['count']
 
         if circle_count > 0:
-            d_obs_circles_positions = cuda.to_device(circles['positions'])
+            circle_pred = self.environment.predict_obstacle_trajectories(self.config.horizon, self.config.dt)
+            d_obs_circles_pred = cuda.to_device(circle_pred)
             d_obs_circles_radii = cuda.to_device(circles['radii'])
         else:
-            d_obs_circles_positions = cuda.to_device(np.zeros((1,2), dtype=np.float32))
+            d_obs_circles_pred = cuda.to_device(np.zeros((1,2), dtype=np.float32))
             d_obs_circles_radii = cuda.to_device(np.zeros(1, dtype=np.float32))
 
         d_obs_circles_count = int(circle_count)
@@ -197,7 +201,6 @@ class MPPIDynObs:
 
         d_obs_polys_count = int(poly_count)
 
-
         robot_radius = self.environment.robot_radius
 
         threads_per_block = 256
@@ -210,8 +213,8 @@ class MPPIDynObs:
 
         cost_kernel[blocks_per_grid, threads_per_block](
             self.d_trajectories, d_samples, self.d_costs, d_x_goal, d_Q_diag, d_R_diag, d_Qf_diag,
-            d_obs_circles_positions, d_obs_circles_radii, d_obs_circles_count,
-            d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count, 
+            d_obs_circles_pred, d_obs_circles_radii, d_obs_circles_count,
+            d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count,
             d_obs_polys_vertices, d_obs_polys_starts, d_obs_polys_lengths, d_obs_polys_count,
             robot_radius, self.config.Q_obs, self.config.d_safe,
             self.config.num_samples, self.config.horizon, self.config.state_dim, self.config.control_dim, self.environment.bounds
@@ -228,7 +231,7 @@ class MPPIDynObs:
             d_min_dists = cuda.device_array(num_samples, dtype=np.float32)
             min_distance_kernel[blocks_per_grid, threads_per_block](
                 self.d_trajectories, d_min_dists,
-                d_obs_circles_positions, d_obs_circles_radii, d_obs_circles_count,
+                d_obs_circles_pred, d_obs_circles_radii, d_obs_circles_count,
                 d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count,
                 d_obs_polys_vertices, d_obs_polys_starts, d_obs_polys_lengths, d_obs_polys_count,
                 robot_radius, self.config.num_samples, self.config.horizon
@@ -239,6 +242,12 @@ class MPPIDynObs:
 
             if not np.any(safe_mask):
                 # No fully-safe samples — pick the sample with maximum clearance
+                self.current_covariance += 0.1
+                self.current_covariance = np.clip(
+                    self.current_covariance,
+                    self.base_covariance,
+                    5.0 * self.base_covariance
+                )
                 best_idx = int(np.argmax(min_dists))
                 u_opt = samples[best_idx, 0, :].astype(np.float32)
                 try:
@@ -252,8 +261,10 @@ class MPPIDynObs:
                     return u_opt, traj_best, is_safe
                 else:
                     return u_opt, None, is_safe
+                # Increase exploration covariance for next iteration
             else:
                 # Penalize unsafe samples so they receive negligible weight
+                self.current_covariance = self.base_covariance.copy()
                 costs[~safe_mask] += 1e6
 
         # Compute weights on CPU (softmin)

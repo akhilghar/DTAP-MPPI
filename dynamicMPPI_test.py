@@ -44,7 +44,7 @@ env.add_obstacle(
 # ============================================================================
 
 # Define function used, reference this function exclusively
-model_name = "differential_drive"
+model_name = "bicycle"
 model = DYNAMICS_REGISTRY[model_name]
 
 model_md = model.metadata
@@ -66,15 +66,15 @@ if state_dim == 4:
     x_goal = np.array([10.0, 10.0, 0.0, 0.0])
 
 else:
-    Q_mod=np.diag([8.0, 8.0, 1.5])
-    Qf_mod=np.diag([50.0, 50.0, 5.0])
-    umin_mod = np.array([-4.0, -4.0])
+    Q_mod=np.diag([7.0, 7.0, 1.0])
+    Qf_mod=np.diag([45.0, 45.0, 5.0])
+    umin_mod = np.array([-0.5, -0.5])
     umax_mod = np.array([4.0, 4.0])
-    noise_mod = np.array([0.7, 0.7])
+    noise_mod = np.array([0.5, 0.5])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([10.0, 0.0, -np.pi])
-    x_goal = np.array([0.0, 10.0, 0.0])
+    x0 = np.array([0.0, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0])
 
 
 config = MPPIConfig(
@@ -182,6 +182,9 @@ robot_patch = Circle((trajectory[0, 0], trajectory[0, 1]),
                      color='blue')
 ax.add_patch(robot_patch)
 
+heading_length = mppi.config.d_safe
+heading_line, = ax.plot([], [], 'k-', linewidth=2)
+
 # Obstacles
 obstacle_patches = []
 for i in range(obstacle_history.shape[1]):
@@ -198,9 +201,20 @@ traj_line, = ax.plot([], [], 'b-', linewidth=2)
 ax.plot(x_goal[0], x_goal[1], 'r*', markersize=15)
 
 def update(frame):
+    # State Acquisition
+    x = trajectory[frame, 0]
+    y = trajectory[frame, 1]
+    theta = trajectory[frame, 2]
 
     # Update robot
-    robot_patch.center = trajectory[frame, :2]
+    robot_patch.center = (x,y)
+    dx = heading_length*np.cos(theta)
+    dy = heading_length*np.sin(theta)
+
+    heading_line.set_data(
+        [x,x+dx],
+        [y,y+dy]
+    )
 
     # Update obstacles
     for i, patch in enumerate(obstacle_patches):
@@ -210,7 +224,7 @@ def update(frame):
     traj_line.set_data(trajectory[:frame+1, 0],
                        trajectory[:frame+1, 1])
 
-    return [robot_patch, traj_line] + obstacle_patches
+    return [robot_patch, traj_line, heading_line] + obstacle_patches
 
 ani = animation.FuncAnimation(
     fig,

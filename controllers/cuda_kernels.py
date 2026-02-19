@@ -119,7 +119,7 @@ def distance_to_polygon(px, py, poly_vertices, start, num_vertices):
 
 @cuda.jit
 def cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
-                circle_positions, circle_radii, num_circles,
+                circle_pred, circle_radii, num_circles,
                 rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
                 poly_vertices, poly_starts, poly_lengths, num_polys,
                 d_safe, Q_obs, robot_radius, num_samples, horizon, state_dim, control_dim, bounds):
@@ -145,7 +145,9 @@ def cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
             
             # Circle obstacles
             for c in range(num_circles):
-                dist = distance_to_circle(px, py, circle_positions[c, 0], circle_positions[c, 1], circle_radii[c])
+                obs_px = circle_pred[c, t, 0]
+                obs_py = circle_pred[c, t, 1]
+                dist = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
                 if dist < d_safe:
                     cost += Q_obs * (d_safe - dist + robot_radius)
 
@@ -211,7 +213,7 @@ def normalize_weights_kernel(weights, normalized_weights, num_samples):
 
 @cuda.jit
 def min_distance_kernel(trajectories, min_dists,
-                        circle_positions, circle_radii, num_circles,
+                        circle_pred, circle_radii, num_circles,
                         rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
                         poly_vertices, poly_starts, poly_lengths, num_polys,
                         robot_radius, num_samples, horizon):
@@ -225,9 +227,11 @@ def min_distance_kernel(trajectories, min_dists,
 
             # circles
             for c in range(num_circles):
-                d = distance_to_circle(px, py, circle_positions[c, 0], circle_positions[c, 1], circle_radii[c]) - robot_radius
-                if d < min_d:
-                    min_d = d
+                obs_px = circle_pred[c, t, 0]
+                obs_py = circle_pred[c, t, 1]
+                dist = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
+                if dist < min_d:
+                    min_d = dist
 
             # rectangles
             for r in range(num_rects):
