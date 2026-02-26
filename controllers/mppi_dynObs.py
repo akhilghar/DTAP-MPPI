@@ -2,6 +2,7 @@
 
 import numpy as np
 from numba import cuda, jit
+from numba.cuda.random import create_xoroshiro128p_states
 import math
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -39,6 +40,15 @@ class MPPIConfig:
 
     # Sampling parameters
     noise_sigma: np.ndarray = None
+
+    # Covariance adaptation parameters
+    covariance_max_scale: float = 5.0   # maximum multiplier on base sigma when in danger
+    covariance_decay: float = 0.7      # per-step decay rate back toward base when recovering
+
+    # Probabilistic obstacle prediction parameters
+    obs_pred_rollouts: int = 50         # Monte Carlo rollouts for GPU obstacle trajectory prediction
+    obs_direction_change_prob: float = 0.05  # per-step probability an obstacle changes direction
+    max_obstacles: int = 20             # capacity for preallocated obstacle GPU buffers
 
     def __post_init__(self):
         if self.Q is None:
@@ -96,6 +106,10 @@ class MPPIDynObs:
         self.base_covariance = self.config.noise_sigma.copy()
         self.current_covariance = self.config.noise_sigma.copy()
 
+        # RNG states for obs_mc_rollout_kernel — lazily grown as obstacle count changes
+        self._rng_states    = None
+        self._rng_n_states  = 0
+
         self._allocate_gpu_memory()
 
     def _allocate_gpu_memory(self):
@@ -116,11 +130,19 @@ class MPPIDynObs:
         self.d_expected_traj = cuda.device_array((horizon + 1, state_dim), dtype=np.float32)
         self.d_expected_controls = cuda.device_array((horizon, control_dim), dtype=np.float32)
 
-        traj_bytes = self.d_trajectories.nbytes
-        cost_bytes = self.d_costs.nbytes
+        # preallocate MC obstacle rollout buffer — capacity: (R, max_obstacles, horizon, 2)
+        # Actual obstacle count N ≤ max_obstacles; the kernel guards n >= N and the cost
+        # kernel only loops c in range(num_circles), so unused columns are never touched.
+        R_cap   = self.config.obs_pred_rollouts
+        N_cap   = self.config.max_obstacles
+        self.d_obs_rollouts = cuda.device_array((R_cap, N_cap, horizon, 2), dtype=np.float32)
+
+        traj_bytes    = self.d_trajectories.nbytes
+        cost_bytes    = self.d_costs.nbytes
         samples_bytes = self.d_samples.nbytes
         weights_bytes = self.d_weights.nbytes
-        total_bytes = traj_bytes + cost_bytes + samples_bytes + weights_bytes
+        obs_mc_bytes  = self.d_obs_rollouts.nbytes
+        total_bytes   = traj_bytes + cost_bytes + samples_bytes + weights_bytes + obs_mc_bytes
         print(f"Allocated GPU memory: {total_bytes / 1e6:.2f} MB")
     
     # Sample control perturbations and add to nominal control sequence
@@ -160,11 +182,45 @@ class MPPIDynObs:
         circle_count = circles['count']
 
         if circle_count > 0:
-            circle_pred = self.environment.predict_obstacle_trajectories(self.config.horizon, self.config.dt)
-            d_obs_circles_pred = cuda.to_device(circle_pred)
+            R = self.config.obs_pred_rollouts
+            N = circle_count
+
+            # Upload current obstacle state to GPU
+            obs_pos = np.array([o.position for o in self.environment.obstacles], dtype=np.float32)  # (N, 2)
+            obs_vel = np.array([o.velocity for o in self.environment.obstacles], dtype=np.float32)  # (N, 2)
+            obs_spd = np.linalg.norm(obs_vel, axis=1).astype(np.float32)                           # (N,)
             d_obs_circles_radii = cuda.to_device(circles['radii'])
+            d_obs_pos = cuda.to_device(obs_pos)
+            d_obs_vel = cuda.to_device(obs_vel)
+            d_obs_spd = cuda.to_device(obs_spd)
+
+            # Lazily (re)allocate RNG states if R×N has grown
+            n_rng = R * N
+            if self._rng_states is None or n_rng > self._rng_n_states:
+                seed = int(np.random.randint(1, 2**31))
+                self._rng_states   = create_xoroshiro128p_states(n_rng, seed=seed)
+                self._rng_n_states = n_rng
+
+            if N > self.config.max_obstacles:
+                raise ValueError(
+                    f"Obstacle count {N} exceeds max_obstacles={self.config.max_obstacles}. "
+                    "Increase MPPIConfig.max_obstacles and recreate the controller."
+                )
+
+            xmin, xmax, ymin, ymax = self.environment.bounds
+            threads_mc  = 256
+            blocks_mc   = (n_rng + threads_mc - 1) // threads_mc
+            obs_mc_rollout_kernel[blocks_mc, threads_mc](
+                self._rng_states, d_obs_pos, d_obs_vel, d_obs_spd, d_obs_circles_radii,
+                np.float32(xmin), np.float32(xmax), np.float32(ymin), np.float32(ymax),
+                self.d_obs_rollouts, R, N, self.config.horizon,
+                np.float32(self.config.dt), np.float32(self.config.obs_direction_change_prob)
+            )
+
+            d_obs_circles_pred = self.d_obs_rollouts
         else:
-            d_obs_circles_pred = cuda.to_device(np.zeros((1,2), dtype=np.float32))
+            R = 0
+            d_obs_circles_pred  = cuda.to_device(np.zeros((1, 1, 1, 2), dtype=np.float32))
             d_obs_circles_radii = cuda.to_device(np.zeros(1, dtype=np.float32))
 
         d_obs_circles_count = int(circle_count)
@@ -211,12 +267,12 @@ class MPPIDynObs:
             self.config.dt, self.config.num_samples, self.config.horizon
         )
 
-        cost_kernel[blocks_per_grid, threads_per_block](
+        mc_cost_kernel[blocks_per_grid, threads_per_block](
             self.d_trajectories, d_samples, self.d_costs, d_x_goal, d_Q_diag, d_R_diag, d_Qf_diag,
-            d_obs_circles_pred, d_obs_circles_radii, d_obs_circles_count,
+            d_obs_circles_pred, d_obs_circles_radii, d_obs_circles_count, R,
             d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count,
             d_obs_polys_vertices, d_obs_polys_starts, d_obs_polys_lengths, d_obs_polys_count,
-            robot_radius, self.config.Q_obs, self.config.d_safe,
+            self.config.d_safe, self.config.Q_obs, robot_radius,
             self.config.num_samples, self.config.horizon, self.config.state_dim, self.config.control_dim, self.environment.bounds
         )
 
@@ -228,30 +284,27 @@ class MPPIDynObs:
 
         if require_safe:
             # Compute per-sample minimum clearance on GPU and copy back just the distances
-            d_min_dists = cuda.device_array(num_samples, dtype=np.float32)
-            min_distance_kernel[blocks_per_grid, threads_per_block](
-                self.d_trajectories, d_min_dists,
-                d_obs_circles_pred, d_obs_circles_radii, d_obs_circles_count,
+            mc_min_dist_kernel[blocks_per_grid, threads_per_block](
+                self.d_trajectories, self.d_min_dists,
+                d_obs_circles_pred, d_obs_circles_radii, d_obs_circles_count, R,
                 d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count,
                 d_obs_polys_vertices, d_obs_polys_starts, d_obs_polys_lengths, d_obs_polys_count,
                 robot_radius, self.config.num_samples, self.config.horizon
             )
 
-            min_dists = d_min_dists.copy_to_host()
+            min_dists = self.d_min_dists.copy_to_host()
             safe_mask = min_dists >= self.config.d_safe
+            safe_fraction = float(np.mean(safe_mask))
+            danger = 1.0 - safe_fraction   # 0 = all safe, 1 = fully trapped
 
-            if not np.any(safe_mask):
-                # No fully-safe samples — pick the sample with maximum clearance
-                self.current_covariance += 0.1
-                self.current_covariance = np.clip(
-                    self.current_covariance,
-                    self.base_covariance,
-                    5.0 * self.base_covariance
-                )
+            if safe_fraction == 0.0:
+                # Fully trapped: jump straight to maximum exploration so the
+                # next rollout has the best chance of finding an escape.
+                self.current_covariance = self.base_covariance * self.config.covariance_max_scale
+
                 best_idx = int(np.argmax(min_dists))
                 u_opt = samples[best_idx, 0, :].astype(np.float32)
                 try:
-                    # copy only the selected trajectory to host
                     traj_best = self.d_trajectories[best_idx].copy_to_host()
                     self.u_nominal = samples[best_idx].copy()
                 except Exception:
@@ -261,11 +314,22 @@ class MPPIDynObs:
                     return u_opt, traj_best, is_safe
                 else:
                     return u_opt, None, is_safe
-                # Increase exploration covariance for next iteration
             else:
-                # Penalize unsafe samples so they receive negligible weight
-                self.current_covariance = self.base_covariance.copy()
+                # Penalize unsafe samples so they receive negligible weight.
                 costs[~safe_mask] += 1e6
+
+                if danger > 0.0:
+                    # Partial danger: scale covariance proportionally
+                    target = self.base_covariance * (
+                        1.0 + (self.config.covariance_max_scale - 1.0) * danger
+                    )
+                    self.current_covariance = np.maximum(self.current_covariance, target)
+                else:
+                    # All samples safe: smoothly decay back
+                    self.current_covariance = (
+                        self.config.covariance_decay * self.current_covariance
+                        + (1.0 - self.config.covariance_decay) * self.base_covariance
+                    )
 
         # Compute weights on CPU (softmin)
         min_cost = np.min(costs)

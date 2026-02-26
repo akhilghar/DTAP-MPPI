@@ -1,4 +1,5 @@
 from numba import cuda, jit
+from numba.cuda.random import xoroshiro128p_uniform_float32
 import numpy as np
 import math
 
@@ -277,3 +278,201 @@ def expected_controls_kernel(samples, weights, out_controls, num_samples, horizo
         for i in range(num_samples):
             acc += weights[i] * samples[i, t, u]
         out_controls[t, u] = acc
+
+
+# ---------------------------------------------------------------------------
+# Monte Carlo obstacle kernels
+# ---------------------------------------------------------------------------
+
+@cuda.jit
+def obs_mc_rollout_kernel(rng_states, positions, velocities, speeds, radii,
+                          xmin, xmax, ymin, ymax,
+                          obs_trajs, R, N, horizon, dt, direction_change_prob):
+    """
+    Generate R independent stochastic rollouts of N dynamic obstacles.
+
+    Thread layout: one thread per (rollout, obstacle) pair.
+        tid = r * N + n   →   r = tid // N,  n = tid % N
+
+    Each thread simulates obstacle n for `horizon` timesteps in rollout r,
+    applying random direction changes and wall bouncing.
+
+    Output shape: obs_trajs[r, n, k, xy]  — (R, N, horizon, 2)
+    """
+    tid = cuda.grid(1)
+    r   = tid // N
+    n   = tid  % N
+
+    if r >= R or n >= N:
+        return
+
+    px  = positions[n, 0]
+    py  = positions[n, 1]
+    vx  = velocities[n, 0]
+    vy  = velocities[n, 1]
+    spd = speeds[n]
+    rad = radii[n]
+
+    for k in range(horizon):
+        # Stochastic direction change
+        if xoroshiro128p_uniform_float32(rng_states, tid) < direction_change_prob:
+            angle = xoroshiro128p_uniform_float32(rng_states, tid) * 2.0 * math.pi
+            vx = spd * math.cos(angle)
+            vy = spd * math.sin(angle)
+
+        px += vx * dt
+        py += vy * dt
+
+        # Wall bounce + clamp
+        if px - rad < xmin or px + rad > xmax:
+            vx = -vx
+            if px - rad < xmin:
+                px = xmin + rad
+            elif px + rad > xmax:
+                px = xmax - rad
+        if py - rad < ymin or py + rad > ymax:
+            vy = -vy
+            if py - rad < ymin:
+                py = ymin + rad
+            elif py + rad > ymax:
+                py = ymax - rad
+
+        obs_trajs[r, n, k, 0] = px
+        obs_trajs[r, n, k, 1] = py
+
+
+@cuda.jit
+def mc_cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
+                   circle_pred, circle_radii, num_circles, num_obs_rollouts,
+                   rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
+                   poly_vertices, poly_starts, poly_lengths, num_polys,
+                   d_safe, Q_obs, robot_radius,
+                   num_samples, horizon, state_dim, control_dim, bounds):
+    """
+    MPPI cost kernel with Monte Carlo obstacle evaluation.
+
+    circle_pred has shape (R, N, horizon, 2): circle_pred[r, c, t, xy]
+    The circle obstacle cost is the average over all R rollouts, giving an
+    unbiased estimate of E[obstacle_cost] under the stochastic obstacle model.
+    Rectangles and polygons remain deterministic.
+    """
+    idx = cuda.grid(1)
+
+    if idx < num_samples:
+        cost = 0.0
+
+        for t in range(horizon):
+            x = trajectories[idx, t]
+            u = samples[idx, t]
+
+            state_cost   = 0.0
+            control_cost = 0.0
+            for i in range(state_dim):
+                state_cost += Q_diag[i] * (x[i] - x_goal[i]) ** 2
+            for i in range(control_dim):
+                control_cost += R_diag[i] * u[i] ** 2
+            cost += state_cost + control_cost
+
+            px = x[0]
+            py = x[1]
+
+            # MC circle cost — average over R obstacle rollouts
+            obs_cost = 0.0
+            for r in range(num_obs_rollouts):
+                for c in range(num_circles):
+                    obs_px = circle_pred[r, c, t, 0]
+                    obs_py = circle_pred[r, c, t, 1]
+                    dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
+                    if dist < d_safe:
+                        obs_cost += Q_obs * (d_safe - dist + robot_radius)
+            if num_obs_rollouts > 0:
+                cost += obs_cost / num_obs_rollouts
+
+            # Deterministic rectangle cost
+            for r in range(num_rects):
+                dist = distance_to_rectangle(px, py,
+                    rect_positions[r, 0], rect_positions[r, 1],
+                    rect_widths[r], rect_heights[r])
+                if dist < d_safe:
+                    cost += Q_obs * (d_safe - dist + robot_radius)
+
+            # Deterministic polygon cost
+            for p in range(num_polys):
+                start  = poly_starts[p]
+                length = poly_lengths[p]
+                if is_in_polygon(px, py, poly_vertices, start, length):
+                    cost += Q_obs * (d_safe + robot_radius)
+                else:
+                    dist = distance_to_polygon(px, py, poly_vertices, start, length)
+                    if dist < d_safe:
+                        cost += Q_obs * (d_safe - dist + robot_radius)
+
+            # Boundary cost
+            if px < bounds[0] + robot_radius:
+                cost += Q_obs ** 2 * (bounds[0] + robot_radius - px)
+            if px > bounds[1] - robot_radius:
+                cost += Q_obs ** 2 * (px - (bounds[1] - robot_radius))
+            if py < bounds[2] + robot_radius:
+                cost += Q_obs ** 2 * (bounds[2] + robot_radius - py)
+            if py > bounds[3] - robot_radius:
+                cost += Q_obs ** 2 * (py - (bounds[3] - robot_radius))
+
+        # Terminal cost
+        x_final      = trajectories[idx, horizon]
+        terminal_cost = 0.0
+        for i in range(state_dim):
+            terminal_cost += Qf_diag[i] * (x_final[i] - x_goal[i]) ** 2
+        cost += terminal_cost
+
+        costs[idx] = cost
+
+
+@cuda.jit
+def mc_min_dist_kernel(trajectories, min_dists,
+                       circle_pred, circle_radii, num_circles, num_obs_rollouts,
+                       rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
+                       poly_vertices, poly_starts, poly_lengths, num_polys,
+                       robot_radius, num_samples, horizon):
+    """
+    Per-sample minimum clearance kernel with MC obstacle evaluation.
+
+    circle_pred has shape (R, N, horizon, 2).
+    Takes the worst-case (minimum) clearance over all R rollouts, which is
+    the appropriate conservative bound for safety checking.
+    """
+    idx = cuda.grid(1)
+
+    if idx < num_samples:
+        min_d = 1e9
+
+        for t in range(horizon):
+            px = trajectories[idx, t, 0]
+            py = trajectories[idx, t, 1]
+
+            # Worst-case over all obstacle rollouts
+            for r in range(num_obs_rollouts):
+                for c in range(num_circles):
+                    obs_px = circle_pred[r, c, t, 0]
+                    obs_py = circle_pred[r, c, t, 1]
+                    dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
+                    if dist < min_d:
+                        min_d = dist
+
+            for r in range(num_rects):
+                d = distance_to_rectangle(px, py,
+                    rect_positions[r, 0], rect_positions[r, 1],
+                    rect_widths[r], rect_heights[r]) - robot_radius
+                if d < min_d:
+                    min_d = d
+
+            for p in range(num_polys):
+                start  = poly_starts[p]
+                length = poly_lengths[p]
+                if is_in_polygon(px, py, poly_vertices, start, length):
+                    d = -1.0
+                else:
+                    d = distance_to_polygon(px, py, poly_vertices, start, length) - robot_radius
+                if d < min_d:
+                    min_d = d
+
+        min_dists[idx] = min_d

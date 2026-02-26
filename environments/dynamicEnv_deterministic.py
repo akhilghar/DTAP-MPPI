@@ -104,7 +104,7 @@ class DeterministicEnv:
     def _in_bounds(self, position: np.ndarray) -> bool:
         pos = position[:2]
         xmin, xmax, ymin, ymax = self.bounds
-        if pos[0] < xmin or pos[0] > xmax or pos[1] < ymin or pos[1] > ymax:
+        if pos[0] < xmin + self.robot_radius or pos[0] > xmax - self.robot_radius or pos[1] < ymin + self.robot_radius or pos[1] > ymax - self.robot_radius:
             return False
         
         return True
@@ -212,54 +212,3 @@ class DeterministicEnv:
     def step(self, dt: float):
         self.move_obstacles(dt)
         self.obstacle_collisions()
-
-import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle
-
-class Visualizer:
-    def __init__(self, env: DeterministicEnv):
-        self.env = env
-
-        self.fig, self.ax = plt.subplots()
-        self.ax.set_aspect("equal")
-
-        xmin, xmax, ymin, ymax = env.bounds
-        self.ax.set_xlim(xmin, xmax)
-        self.ax.set_ylim(ymin, ymax)
-
-        # Draw boundary box
-        self.ax.add_patch(
-            Rectangle((xmin, ymin),
-                      xmax - xmin,
-                      ymax - ymin,
-                      fill=False,
-                      linewidth=2)
-        )
-
-        # Obstacle patches
-        self.obstacle_patches = []
-
-        for obs in env.obstacles:
-            circle = Circle(obs.position, obs.radius, color="red")
-            self.ax.add_patch(circle)
-            self.obstacle_patches.append(circle)
-
-        # Robot patch (optional)
-        self.robot_patch = Circle((0, 0), env.robot_radius, color="blue")
-        self.ax.add_patch(self.robot_patch)
-
-        plt.ion()
-        plt.show()
-
-    def render(self, robot_position=None):
-        # Update obstacle positions
-        for patch, obs in zip(self.obstacle_patches, self.env.obstacles):
-            patch.center = obs.position
-
-        # Update robot position
-        if robot_position is not None:
-            self.robot_patch.center = robot_position[:2]
-
-        self.fig.canvas.draw_idle()
-        plt.pause(0.001)
-
