@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: dtap-mppi
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.13
+Description-Content-Type: text/markdown
+Requires-Dist: cvxpy>=1.8.1
+Requires-Dist: gymnasium>=1.2.3
+Requires-Dist: matplotlib>=3.10.8
+Requires-Dist: moviepy>=2.2.1
+Requires-Dist: mujoco>=3.4.0
+Requires-Dist: notebook>=7.5.3
+Requires-Dist: numba>=0.63.1
+Requires-Dist: numpy>=2.3.5
+Requires-Dist: pandas>=3.0.0
+Requires-Dist: torch>=2.10.0
+
+# DTAP-MPPI
+DTAP-MPPI (Dynamic Terrain-Aware Payload MPPI) is an augmented control algorithm based on the Model-Predictive Path Integral (MPPI) Framework. The augmentations optimize the MPPI control framework for payload transportation robots. These robots are designed to transport various packages from a starting point to a goal region in an environment with dynamic obstacles at variable density. This repository utilizes Numba-CUDA for GPU-accelerated programming in a Python environment. 
+
+## Dependencies
+This repository requires the following before usage:
+* Python 3.13
+* An NVIDIA GPU supported by Numba
+* CUDA Toolkit
+* uv (Refer to https://docs.astral.sh/uv/getting-started/installation/ for installation)

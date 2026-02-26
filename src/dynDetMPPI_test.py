@@ -218,7 +218,7 @@ ani = animation.FuncAnimation(
 )
 t_fin = time.time()
 plt.show()
-ani.save(f"media/GIFs/mppi_animation_{model_name}_{t_fin:.2f}_det.gif", writer="pillow", fps=1/config.dt)
+ani.save(f"../media/GIFs/mppi_animation_{model_name}_{t_fin:.2f}_det.gif", writer="pillow", fps=1/config.dt)
 print("Saved animated GIF of Robot.")
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 12))
@@ -271,7 +271,7 @@ ax4.set_title("Distance to Goal")
 ax4.grid(True)
 
 plt.tight_layout()
-filename = f'media/Visualizations/mppi_result_{model_name}_{t_fin:.2f}_dynDet.png'
+filename = f'../media/Visualizations/mppi_result_{model_name}_{t_fin:.2f}_dynDet.png'
 plt.savefig(filename, dpi=150)
 # plt.show()
 

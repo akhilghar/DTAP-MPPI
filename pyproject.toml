@@ -16,3 +16,7 @@ dependencies = [
     "pandas>=3.0.0",
     "torch>=2.10.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["controllers*", "environments*", "dynamics*"]
