@@ -15,9 +15,9 @@ env = ProbabilisticEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_r
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(1,15):
+for i in range(1,10):
     env.add_obstacle(
-        Obstacle(position=[np.random.randint(-corridor_width, corridor_width-1), np.random.randint(1.0, 22.0)], 
+        Obstacle(position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
                  radius=0.3+0.5*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
                  mode=ObstacleMode.AVOIDANT)

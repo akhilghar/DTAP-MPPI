@@ -1,5 +1,5 @@
 from numba import cuda, jit
-from numba.cuda.random import xoroshiro128p_uniform_float32
+from numba.cuda.random import xoroshiro128p_uniform_float32, xoroshiro128p_normal_float32
 import numpy as np
 import math
 
@@ -98,7 +98,6 @@ def distance_to_rectangle(px, py, cx, cy, width, height):
     dy = max(bottom - py, 0, py - top)
     return math.sqrt(dx * dx + dy * dy)
 
-@cuda.jit(device=True)
 @cuda.jit(device=True)
 def distance_to_polygon(px, py, poly_vertices, start, num_vertices):
     # Compute the distance from point (px, py) to the edges of a polygon stored in
@@ -476,3 +475,184 @@ def mc_min_dist_kernel(trajectories, min_dists,
                     min_d = d
 
         min_dists[idx] = min_d
+
+
+# ---------------------------------------------------------------------------
+# Coalesced-layout kernels used by MPPIDynObs
+# ---------------------------------------------------------------------------
+
+def make_rollout_kernel_coalesced(dynamics_func, state_dim, control_dim):
+    """
+    Like make_rollout_kernel but reads samples in (horizon, num_samples, control_dim)
+    layout so that consecutive threads access consecutive memory at each timestep.
+    trajectories layout unchanged: (num_samples, horizon+1, state_dim).
+    """
+    @cuda.jit
+    def rollout_cuda_coalesced(samples, trajectories, x0, params, dt, num_samples, horizon):
+        idx = cuda.grid(1)
+        if idx < num_samples:
+            for i in range(state_dim):
+                trajectories[idx, 0, i] = x0[i]
+
+            for t in range(horizon):
+                x = cuda.local.array(state_dim, dtype=np.float32)
+                for i in range(state_dim):
+                    x[i] = trajectories[idx, t, i]
+
+                u = cuda.local.array(control_dim, dtype=np.float32)
+                for i in range(control_dim):
+                    u[i] = samples[t, idx, i]      # (H, N, C) layout
+
+                x_next = cuda.local.array(state_dim, dtype=np.float32)
+                dynamics_func(x, u, dt, params, x_next)
+
+                for i in range(state_dim):
+                    trajectories[idx, t + 1, i] = x_next[i]
+
+    return rollout_cuda_coalesced
+
+
+@cuda.jit
+def generate_samples_kernel(rng_states, samples, u_nominal, sigma, u_min, u_max,
+                             num_samples, horizon, control_dim):
+    """
+    Generate perturbed control samples entirely on GPU.
+
+    samples:   (horizon, num_samples, control_dim)  — coalesced layout
+    u_nominal: (horizon, control_dim)
+    sigma, u_min, u_max: (control_dim,)
+
+    One thread per sample; draws horizon*control_dim normal values by
+    advancing its own xoroshiro128p state repeatedly.
+    """
+    idx = cuda.grid(1)
+    if idx < num_samples:
+        for t in range(horizon):
+            for d in range(control_dim):
+                noise = xoroshiro128p_normal_float32(rng_states, idx)
+                u = u_nominal[t, d] + sigma[d] * noise
+                if u < u_min[d]:
+                    u = u_min[d]
+                if u > u_max[d]:
+                    u = u_max[d]
+                samples[t, idx, d] = u
+
+
+@cuda.jit
+def mc_cost_and_min_dist_kernel(
+        trajectories, samples, costs, min_dists,
+        x_goal, Q_diag, R_diag, Qf_diag,
+        circle_pred, circle_radii, num_circles, num_obs_rollouts,
+        rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
+        poly_vertices, poly_starts, poly_lengths, num_polys,
+        d_safe, Q_obs, robot_radius,
+        num_samples, horizon, state_dim, control_dim, bounds):
+    """
+    Single-pass kernel that computes both MPPI cost and minimum clearance.
+
+    Replaces the mc_cost_kernel + mc_min_dist_kernel pair, halving the number
+    of expensive inner-loop (R x N) passes over obstacle trajectories.
+
+    trajectories: (num_samples, horizon+1, state_dim)
+    samples:      (horizon, num_samples, control_dim)  — coalesced layout
+    circle_pred:  (R, N, horizon, 2)
+    """
+    idx = cuda.grid(1)
+    if idx < num_samples:
+        cost  = 0.0
+        min_d = 1e9
+
+        for t in range(horizon):
+            state_cost = 0.0
+            for i in range(state_dim):
+                diff = trajectories[idx, t, i] - x_goal[i]
+                state_cost += Q_diag[i] * diff * diff
+
+            control_cost = 0.0
+            for i in range(control_dim):
+                u = samples[t, idx, i]
+                control_cost += R_diag[i] * u * u
+
+            cost += state_cost + control_cost
+
+            px = trajectories[idx, t, 0]
+            py = trajectories[idx, t, 1]
+
+            # MC circle cost (average over rollouts) + worst-case min_dist
+            obs_cost = 0.0
+            for r in range(num_obs_rollouts):
+                for c in range(num_circles):
+                    obs_px = circle_pred[r, c, t, 0]
+                    obs_py = circle_pred[r, c, t, 1]
+                    dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
+                    if dist < d_safe:
+                        obs_cost += Q_obs * (d_safe - dist + robot_radius)
+                    if dist < min_d:
+                        min_d = dist
+            if num_obs_rollouts > 0:
+                cost += obs_cost / num_obs_rollouts
+
+            # Deterministic rectangle cost + clearance
+            for r in range(num_rects):
+                dist = distance_to_rectangle(px, py,
+                    rect_positions[r, 0], rect_positions[r, 1],
+                    rect_widths[r], rect_heights[r])
+                if dist < d_safe:
+                    cost += Q_obs * (d_safe - dist + robot_radius)
+                d_clr = dist - robot_radius
+                if d_clr < min_d:
+                    min_d = d_clr
+
+            # Deterministic polygon cost + clearance
+            for p in range(num_polys):
+                start  = poly_starts[p]
+                length = poly_lengths[p]
+                if is_in_polygon(px, py, poly_vertices, start, length):
+                    cost += Q_obs * (d_safe + robot_radius)
+                    if -1.0 < min_d:
+                        min_d = -1.0
+                else:
+                    dist = distance_to_polygon(px, py, poly_vertices, start, length)
+                    if dist < d_safe:
+                        cost += Q_obs * (d_safe - dist + robot_radius)
+                    d_clr = dist - robot_radius
+                    if d_clr < min_d:
+                        min_d = d_clr
+
+            # Boundary cost
+            if px < bounds[0] + robot_radius:
+                cost += Q_obs ** 2 * (bounds[0] + robot_radius - px)
+            if px > bounds[1] - robot_radius:
+                cost += Q_obs ** 2 * (px - (bounds[1] - robot_radius))
+            if py < bounds[2] + robot_radius:
+                cost += Q_obs ** 2 * (bounds[2] + robot_radius - py)
+            if py > bounds[3] - robot_radius:
+                cost += Q_obs ** 2 * (py - (bounds[3] - robot_radius))
+
+        # Terminal cost
+        terminal_cost = 0.0
+        for i in range(state_dim):
+            diff = trajectories[idx, horizon, i] - x_goal[i]
+            terminal_cost += Qf_diag[i] * diff * diff
+        cost += terminal_cost
+
+        costs[idx]     = cost
+        min_dists[idx] = min_d
+
+
+@cuda.jit
+def expected_controls_coalesced_kernel(samples, weights, out_controls,
+                                        num_samples, horizon, control_dim):
+    """
+    Expected controls for coalesced sample layout (horizon, num_samples, control_dim).
+    One thread per (t, c) output element; reduces over all samples.
+    """
+    tid = cuda.grid(1)
+    total = horizon * control_dim
+    if tid < total:
+        t = tid // control_dim
+        c = tid % control_dim
+        acc = 0.0
+        for i in range(num_samples):
+            acc += weights[i] * samples[t, i, c]
+        out_controls[t, c] = acc
