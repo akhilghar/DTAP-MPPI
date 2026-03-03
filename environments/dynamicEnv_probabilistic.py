@@ -140,13 +140,7 @@ class Obstacle:
     # Public API
     # ------------------------------------------------------------------
 
-    def move(
-        self,
-        dt: float,
-        robot_pos: Optional[np.ndarray] = None,
-        bounds=None,
-        neighbors: Optional[list] = None,
-    ) -> None:
+    def move(self, dt: float, robot_pos: Optional[np.ndarray] = None, bounds=None, neighbors: Optional[list] = None) -> None:
         self._goal_timer += dt
 
         if self.mode == ObstacleMode.APATHETIC:
@@ -223,11 +217,7 @@ class ProbabilisticEnv:
 
         return {'circles': circles, 'rectangles': rectangles, 'polygons': polygons}
 
-    def move_obstacles(
-        self,
-        dt: float,
-        robot_pos: Optional[np.ndarray] = None,
-    ) -> None:
+    def move_obstacles(self, dt: float, robot_pos: Optional[np.ndarray] = None) -> None:
         # Pre-build (position, radius) snapshot so each obstacle sees the same
         # neighbor state at the start of the timestep, not partially-updated positions.
         neighbor_snapshot = [(o.position.copy(), o.radius) for o in self.obstacles]

@@ -184,6 +184,8 @@ class MPPIDynObs:
         self.d_dummy_float1 = cuda.to_device(np.zeros(1,      dtype=np.float32))
         self.d_dummy_int1   = cuda.to_device(np.zeros(1,      dtype=np.int32))
 
+        self._last_expected_traj = None
+
         total_bytes = (
             self.d_samples.nbytes + self.d_trajectories.nbytes +
             self.d_costs.nbytes   + self.d_min_dists.nbytes    +
@@ -336,8 +338,8 @@ class MPPIDynObs:
                 u_opt           = u_nominal_best[0, :].astype(np.float32)
                 self.u_nominal  = u_nominal_best
 
-                traj_best = (self.d_trajectories[best_idx].copy_to_host()
-                             if return_trajectory else None)
+                traj_best = self.d_trajectories[best_idx].copy_to_host()
+                self._last_expected_traj = traj_best
                 is_safe = False
                 if return_trajectory:
                     return u_opt, traj_best, is_safe
@@ -351,6 +353,7 @@ class MPPIDynObs:
                     1.0 + (self.config.covariance_max_scale - 1.0) * danger
                 )
                 self.current_covariance = np.maximum(self.current_covariance, target)
+                self.config.covariance_decay = 0.3 + 0.6 * danger**3
             else:
                 self.current_covariance = (
                     self.config.covariance_decay * self.current_covariance
@@ -366,21 +369,21 @@ class MPPIDynObs:
         # ---- Expected trajectory and controls on GPU (use preallocated buffers) ----
         cuda.to_device(weights, to=self.d_weights)
 
+        # One block per output element — threads within each block reduce over num_samples
         total_traj_elems = (self.config.horizon + 1) * self.config.state_dim
-        blocks_traj = (total_traj_elems + threads - 1) // threads
-        expected_trajectory_kernel[blocks_traj, threads](
+        expected_trajectory_kernel[total_traj_elems, 256](
             self.d_trajectories, self.d_weights, self.d_expected_traj,
             self.config.num_samples, self.config.horizon, self.config.state_dim,
         )
 
         total_ctrl_elems = self.config.horizon * self.config.control_dim
-        blocks_ctrl = (total_ctrl_elems + threads - 1) // threads
-        expected_controls_coalesced_kernel[blocks_ctrl, threads](
+        expected_controls_coalesced_kernel[total_ctrl_elems, 256](
             self.d_samples, self.d_weights, self.d_expected_controls,
             self.config.num_samples, self.config.horizon, self.config.control_dim,
         )
 
-        trajectory = self.d_expected_traj.copy_to_host() if return_trajectory else None
+        self._last_expected_traj = self.d_expected_traj.copy_to_host()
+        trajectory = self._last_expected_traj if return_trajectory else None
         expected_controls = self.d_expected_controls.copy_to_host()   # (H, C)
 
         self.u_nominal = expected_controls
@@ -405,6 +408,16 @@ class MPPIDynObs:
                     break
 
         return u_opt, is_safe
+
+    def get_rollout_snapshot(self, n: int = 5):
+        """Return (expected_traj, sample_trajs) from the most recent solve.
+
+        expected_traj : (H+1, S) weighted-mean (selected) trajectory.
+        sample_trajs  : (n, H+1, S) array of n random sample rollouts.
+        """
+        indices = np.random.choice(self.config.num_samples, size=n, replace=False)
+        sample_trajs = np.stack([self.d_trajectories[i].copy_to_host() for i in indices])
+        return self._last_expected_traj, sample_trajs
 
     def free_gpu_buffers(self, force_reset: bool = False):
         import gc

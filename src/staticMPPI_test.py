@@ -91,6 +91,7 @@ controls = []
 num_steps = 200
 
 x = x0.copy()
+goal_reached = 0
 
 print("Running MPPI simulation...")
 for step in range(num_steps):
@@ -108,8 +109,9 @@ for step in range(num_steps):
     
     # Check if reached goal
     if np.linalg.norm(x[:2] - x_goal[:2]) < 0.5:
-        print(f"Reached goal at step {step}")
-        break
+        goal_reached += 1
+        if goal_reached <= 1:
+            print(f"Reached goal at step {step}")
     
     if step % 20 == 0:
         end = time.time()

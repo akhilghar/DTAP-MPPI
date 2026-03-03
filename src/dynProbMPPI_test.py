@@ -10,12 +10,12 @@ from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, Ob
 # ============================================================================
 # Setup Environment
 # ============================================================================
-corridor_width = 4.0
+corridor_width = 8.0
 env = ProbabilisticEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.25)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(1,10):
+for i in range(1,15):
     env.add_obstacle(
         Obstacle(position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
                  radius=0.3+0.5*np.random.rand(),
@@ -37,17 +37,17 @@ control_dim = model_md["control_dim"]
 
 print("State Dimensions: ", state_dim)
 
-max_deg = 60.0
+max_deg = 75.0
 if state_dim == 4:
     Q_mod=np.diag([10.0, 10.0, 2.0, 2.0])
-    Qf_mod=np.diag([50.0, 50.0, 10.0, 10.0])
+    Qf_mod=np.diag([50.0, 50.0, 10.0, 50.0])
     umin_mod = np.array([-2.0, -max_deg*np.pi/180])
     umax_mod = np.array([2.0, max_deg*np.pi/180])
-    noise_mod = np.array([0.55, 0.2])
+    noise_mod = np.array([0.55, 0.15])
     ctrl_label_1 = "Acceleration"
     ctrl_label_2 = "Steering Angle"
     x0 = np.array([0.0, 0.0, np.pi/2, 0.0])
-    x_goal = np.array([0.0, 20.0, 0.0, 0.0])
+    x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
     Q_mod=np.diag([7.0, 7.0, 2.0])
@@ -94,6 +94,7 @@ trajectory = [x0.copy()]
 controls = []
 
 obstacle_history = []
+rollout_snapshots = {}  # step -> (expected_traj, sample_trajs), sampled every 20 steps
 
 x = x0.copy()
 num_steps = 300
@@ -124,11 +125,12 @@ for step in range(num_steps):
     controls.append(u.copy())
 
     # --- Goal check ---
-    if np.linalg.norm(x[:2] - x_goal[:2]) < 0.5:
+    if np.linalg.norm(x[:2] - x_goal[:2]) < env.robot_radius:
         print(f"Reached goal at step {step}")
         break
 
     if step % 20 == 0:
+        rollout_snapshots[step] = mppi.get_rollout_snapshot(n=5)
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
               f"safe={is_safe}, "
               f"time per step={end-start:.3f}s")
@@ -181,6 +183,14 @@ for i in range(obstacle_history.shape[1]):
 # Trajectory trail
 traj_line, = ax.plot([], [], 'b-', linewidth=2)
 
+# Rollout visualization: sample trajectories + selected (weighted-mean) trajectory
+N_DISPLAY_ROLLOUTS = 5
+sample_rollout_lines = [
+    ax.plot([], [], color='orange', alpha=0.25, linewidth=0.8, zorder=1)[0]
+    for _ in range(N_DISPLAY_ROLLOUTS)
+]
+selected_rollout_line, = ax.plot([], [], color='lime', alpha=0.85, linewidth=1.5, zorder=2)
+
 # Goal
 ax.plot(x_goal[0], x_goal[1], 'r*', markersize=15)
 
@@ -208,7 +218,17 @@ def update(frame):
     traj_line.set_data(trajectory[:frame+1, 0],
                        trajectory[:frame+1, 1])
 
-    return [robot_patch, traj_line, heading_line] + obstacle_patches
+    # Update rollout lines using the most recent snapshot (every 20 frames)
+    snapshot_step = (frame // 20) * 20
+    if snapshot_step in rollout_snapshots:
+        exp_traj, sample_trajs = rollout_snapshots[snapshot_step]
+        if exp_traj is not None:
+            selected_rollout_line.set_data(exp_traj[:, 0], exp_traj[:, 1])
+        for j, line in enumerate(sample_rollout_lines):
+            line.set_data(sample_trajs[j, :, 0], sample_trajs[j, :, 1])
+
+    return ([robot_patch, traj_line, heading_line, selected_rollout_line]
+            + sample_rollout_lines + obstacle_patches)
 
 ani = animation.FuncAnimation(
     fig,

@@ -1,4 +1,4 @@
-from numba import cuda, jit
+from numba import cuda, jit, float32 as numba_float32
 from numba.cuda.random import xoroshiro128p_uniform_float32, xoroshiro128p_normal_float32
 import numpy as np
 import math
@@ -118,8 +118,8 @@ def distance_to_polygon(px, py, poly_vertices, start, num_vertices):
     return min_dist
 
 @cuda.jit
-def cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
-                circle_pred, circle_radii, num_circles,
+def static_cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
+                circle_positions, circle_radii, num_circles,
                 rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
                 poly_vertices, poly_starts, poly_lengths, num_polys,
                 d_safe, Q_obs, robot_radius, num_samples, horizon, state_dim, control_dim, bounds):
@@ -145,8 +145,8 @@ def cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
             
             # Circle obstacles
             for c in range(num_circles):
-                obs_px = circle_pred[c, t, 0]
-                obs_py = circle_pred[c, t, 1]
+                obs_px = circle_positions[c, 0]
+                obs_py = circle_positions[c, 1]
                 dist = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
                 if dist < d_safe:
                     cost += Q_obs * (d_safe - dist + robot_radius)
@@ -212,8 +212,8 @@ def normalize_weights_kernel(weights, normalized_weights, num_samples):
 
 
 @cuda.jit
-def min_distance_kernel(trajectories, min_dists,
-                        circle_pred, circle_radii, num_circles,
+def static_min_distance_kernel(trajectories, min_dists,
+                        circle_positions, circle_radii, num_circles,
                         rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
                         poly_vertices, poly_starts, poly_lengths, num_polys,
                         robot_radius, num_samples, horizon):
@@ -227,8 +227,8 @@ def min_distance_kernel(trajectories, min_dists,
 
             # circles
             for c in range(num_circles):
-                obs_px = circle_pred[c, t, 0]
-                obs_py = circle_pred[c, t, 1]
+                obs_px = circle_positions[c, 0]
+                obs_py = circle_positions[c, 1]
                 dist = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
                 if dist < min_d:
                     min_d = dist
@@ -255,15 +255,40 @@ def min_distance_kernel(trajectories, min_dists,
 
 @cuda.jit
 def expected_trajectory_kernel(trajectories, weights, out_traj, num_samples, horizon, state_dim):
-    tid = cuda.grid(1)
+    """
+    Parallel reduction: one block per output element (t, s).
+    Grid = (horizon+1)*state_dim blocks, Block = 256 threads.
+    Each block's threads cooperatively sum over num_samples via shared memory.
+    """
+    output_idx = cuda.blockIdx.x
     total = (horizon + 1) * state_dim
-    if tid < total:
-        t = tid // state_dim
-        s = tid % state_dim
-        acc = 0.0
-        for i in range(num_samples):
-            acc += weights[i] * trajectories[i, t, s]
-        out_traj[t, s] = acc
+    if output_idx >= total:
+        return
+
+    t   = output_idx // state_dim
+    s   = output_idx % state_dim
+    tid = cuda.threadIdx.x
+    bsz = cuda.blockDim.x
+
+    shared = cuda.shared.array(256, dtype=numba_float32)
+
+    acc = numba_float32(0.0)
+    i = tid
+    while i < num_samples:
+        acc += weights[i] * trajectories[i, t, s]
+        i += bsz
+    shared[tid] = acc
+    cuda.syncthreads()
+
+    stride = bsz >> 1
+    while stride > 0:
+        if tid < stride:
+            shared[tid] += shared[tid + stride]
+        cuda.syncthreads()
+        stride >>= 1
+
+    if tid == 0:
+        out_traj[t, s] = shared[0]
 
 
 @cuda.jit
@@ -621,13 +646,17 @@ def mc_cost_and_min_dist_kernel(
 
             # Boundary cost
             if px < bounds[0] + robot_radius:
-                cost += Q_obs ** 2 * (bounds[0] + robot_radius - px)
+                cost += Q_obs * (bounds[0] + robot_radius - px)
             if px > bounds[1] - robot_radius:
-                cost += Q_obs ** 2 * (px - (bounds[1] - robot_radius))
+                cost += Q_obs * (px - (bounds[1] - robot_radius))
             if py < bounds[2] + robot_radius:
-                cost += Q_obs ** 2 * (bounds[2] + robot_radius - py)
+                cost += Q_obs * (bounds[2] + robot_radius - py)
             if py > bounds[3] - robot_radius:
-                cost += Q_obs ** 2 * (py - (bounds[3] - robot_radius))
+                cost += Q_obs * (py - (bounds[3] - robot_radius))
+
+            # Goal reward
+            if math.sqrt((px - x_goal[0]) ** 2 + (py - x_goal[1]) ** 2) < robot_radius:
+                cost -= 100.0  # Reward for being within goal radius
 
         # Terminal cost
         terminal_cost = 0.0
@@ -644,15 +673,37 @@ def mc_cost_and_min_dist_kernel(
 def expected_controls_coalesced_kernel(samples, weights, out_controls,
                                         num_samples, horizon, control_dim):
     """
-    Expected controls for coalesced sample layout (horizon, num_samples, control_dim).
-    One thread per (t, c) output element; reduces over all samples.
+    Parallel reduction: one block per output element (t, c).
+    Grid = horizon*control_dim blocks, Block = 256 threads.
+    Each block's threads cooperatively sum over num_samples via shared memory.
+    samples layout: (horizon, num_samples, control_dim) — coalesced stride-C access.
     """
-    tid = cuda.grid(1)
+    output_idx = cuda.blockIdx.x
     total = horizon * control_dim
-    if tid < total:
-        t = tid // control_dim
-        c = tid % control_dim
-        acc = 0.0
-        for i in range(num_samples):
-            acc += weights[i] * samples[t, i, c]
-        out_controls[t, c] = acc
+    if output_idx >= total:
+        return
+
+    t   = output_idx // control_dim
+    c   = output_idx % control_dim
+    tid = cuda.threadIdx.x
+    bsz = cuda.blockDim.x
+
+    shared = cuda.shared.array(256, dtype=numba_float32)
+
+    acc = numba_float32(0.0)
+    i = tid
+    while i < num_samples:
+        acc += weights[i] * samples[t, i, c]
+        i += bsz
+    shared[tid] = acc
+    cuda.syncthreads()
+
+    stride = bsz >> 1
+    while stride > 0:
+        if tid < stride:
+            shared[tid] += shared[tid + stride]
+        cuda.syncthreads()
+        stride >>= 1
+
+    if tid == 0:
+        out_controls[t, c] = shared[0]

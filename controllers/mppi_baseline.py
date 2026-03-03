@@ -208,7 +208,7 @@ class MPPIBaseline:
             self.config.dt, self.config.num_samples, self.config.horizon
         )
 
-        cost_kernel[blocks_per_grid, threads_per_block](
+        static_cost_kernel[blocks_per_grid, threads_per_block](
             self.d_trajectories, d_samples, self.d_costs, d_x_goal, d_Q_diag, d_R_diag, d_Qf_diag,
             d_obs_circles_positions, d_obs_circles_radii, d_obs_circles_count,
             d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count, 
@@ -226,7 +226,7 @@ class MPPIBaseline:
         if require_safe:
             # Compute per-sample minimum clearance on GPU and copy back just the distances
             d_min_dists = cuda.device_array(num_samples, dtype=np.float32)
-            min_distance_kernel[blocks_per_grid, threads_per_block](
+            static_min_distance_kernel[blocks_per_grid, threads_per_block](
                 self.d_trajectories, d_min_dists,
                 d_obs_circles_positions, d_obs_circles_radii, d_obs_circles_count,
                 d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count,
