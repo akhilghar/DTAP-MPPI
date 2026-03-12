@@ -10,15 +10,15 @@ from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, Ob
 # ============================================================================
 # Setup Environment
 # ============================================================================
-corridor_width = 8.0
-env = ProbabilisticEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.25)
+corridor_width = 4.0
+env = ProbabilisticEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.2)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(1,15):
+for i in range(1,8):
     env.add_obstacle(
         Obstacle(position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
-                 radius=0.3+0.5*np.random.rand(),
+                 radius=0.3+0.4*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
                  mode=ObstacleMode.AVOIDANT)
     )
@@ -39,8 +39,9 @@ print("State Dimensions: ", state_dim)
 
 max_deg = 75.0
 if state_dim == 4:
-    Q_mod=np.diag([10.0, 10.0, 2.0, 2.0])
+    Q_mod=np.diag([10.0, 10.0, 2.0, 10.0])
     Qf_mod=np.diag([50.0, 50.0, 10.0, 50.0])
+    R_mod = np.diag([0.1, 0.1])
     umin_mod = np.array([-2.0, -max_deg*np.pi/180])
     umax_mod = np.array([2.0, max_deg*np.pi/180])
     noise_mod = np.array([0.55, 0.15])
@@ -50,11 +51,12 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([7.0, 7.0, 2.0])
+    Q_mod=np.diag([7.0, 7.0, 1.5])
     Qf_mod=np.diag([40.0, 40.0, 5.0])
+    R_mod = np.eye(control_dim) * 10.0
     umin_mod = np.array([-4.0, -4.0])
     umax_mod = np.array([4.0, 4.0])
-    noise_mod = np.array([0.6, 0.6])
+    noise_mod = np.array([0.5, 0.5])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
     x0 = np.array([0.0, 0.0, 0.0])
@@ -69,7 +71,7 @@ config = MPPIConfig(
 
     Q=Q_mod,
     Qf=Qf_mod,
-    R=np.diag([0.1, 0.1]),
+    R=R_mod,
 
     Q_obs=250.0,
     d_safe=env.robot_radius + 0.1,
@@ -112,6 +114,7 @@ for step in range(num_steps):
     # --- Get MPPI control ---
     start = time.time()
     u, is_safe = mppi.get_control(x, x_goal)
+    cov = mppi.get_covariance()
     end = time.time()
 
     # --- Apply dynamics ---
@@ -124,14 +127,20 @@ for step in range(num_steps):
     trajectory.append(x.copy())
     controls.append(u.copy())
 
+    if state_dim == 4:
+        vel = x[3]
+    else:
+        vel = 0.5*u[0] + 0.5*u[1]
+
     # --- Goal check ---
-    if np.linalg.norm(x[:2] - x_goal[:2]) < env.robot_radius:
+    if (np.linalg.norm(x[:2] - x_goal[:2]) < env.robot_radius) & (vel < 0.01):
         print(f"Reached goal at step {step}")
         break
 
     if step % 20 == 0:
         rollout_snapshots[step] = mppi.get_rollout_snapshot(n=5)
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
+              f"covariance={cov}, "
               f"safe={is_safe}, "
               f"time per step={end-start:.3f}s")
 

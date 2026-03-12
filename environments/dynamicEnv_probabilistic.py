@@ -12,7 +12,7 @@ class ObstacleMode(Enum):
 class Obstacle:
 
     def __init__(self, position: np.ndarray, radius: float, velocity: np.ndarray = None, mode: ObstacleMode = ObstacleMode.APATHETIC,
-        speed: float = None, tau: float = 0.1, avoidance_radius: float = 3.0, avoidance_strength: float = 6.0,
+        speed: float = None, tau: float = 0.1, avoidance_radius: float = 3.0, avoidance_strength: float = 3.0,
         neighbor_avoidance_radius: float = 1.5, neighbor_avoidance_strength: float = 1.0):
         self.position = np.asarray(position, dtype=np.float32)
         if velocity is None:
@@ -163,7 +163,6 @@ class Obstacle:
         self.velocity += (v_desired - self.velocity) * (dt / self.tau)
 
         self.position += self.velocity * dt
-
 
 class ProbabilisticEnv:
     def __init__(

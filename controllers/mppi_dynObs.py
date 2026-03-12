@@ -5,6 +5,7 @@ from numba import cuda
 from numba.cuda.random import create_xoroshiro128p_states
 from dataclasses import dataclass
 from typing import Callable, Optional
+from scipy.signal import savgol_filter
 
 from controllers.cuda_kernels import (
     make_rollout_kernel_coalesced,
@@ -49,7 +50,7 @@ class MPPIConfig:
     noise_sigma: np.ndarray = None
 
     # Covariance adaptation parameters
-    covariance_max_scale: float = 5.0   # maximum multiplier on base sigma when in danger
+    covariance_max_scale: float = 4.0   # maximum multiplier on base sigma when in danger
     covariance_decay: float = 0.7       # per-step decay rate back toward base when recovering
 
     # Probabilistic obstacle prediction parameters
@@ -303,7 +304,7 @@ class MPPIDynObs:
             self.config.dt, self.config.num_samples, self.config.horizon,
         )
 
-        # ---- Single-pass cost + min_dist (replaces two separate kernel calls) ----
+        # ---- Single-pass cost + min_dist ----
         mc_cost_and_min_dist_kernel[blocks, threads](
             self.d_trajectories, self.d_samples, self.d_costs, self.d_min_dists,
             self.d_x_goal, self.d_Q_diag, self.d_R_diag, self.d_Qf_diag,
@@ -360,7 +361,7 @@ class MPPIDynObs:
                     + (1.0 - self.config.covariance_decay) * self.base_covariance
                 )
 
-        # ---- CPU softmin weights (80 KB D2H already done; weights are cheap on CPU) ----
+        # ---- CPU softmin weights ----
         min_cost   = np.min(costs)
         weights    = np.exp(-(costs - min_cost) / max(1e-8, self.config.lambda_)).astype(np.float32)
         w_sum      = np.sum(weights)
@@ -385,8 +386,12 @@ class MPPIDynObs:
         self._last_expected_traj = self.d_expected_traj.copy_to_host()
         trajectory = self._last_expected_traj if return_trajectory else None
         expected_controls = self.d_expected_controls.copy_to_host()   # (H, C)
+        # print(expected_controls)
 
-        self.u_nominal = expected_controls
+        window_size = 11
+        window_deg = 4
+        self.u_nominal[:, 0] = savgol_filter(expected_controls[:, 0], window_size, window_deg)
+        self.u_nominal[:, 1] = savgol_filter(expected_controls[:, 1], window_size, window_deg)
         u_opt = expected_controls[0, :].astype(np.float32)
 
         if return_trajectory:
@@ -418,6 +423,9 @@ class MPPIDynObs:
         indices = np.random.choice(self.config.num_samples, size=n, replace=False)
         sample_trajs = np.stack([self.d_trajectories[i].copy_to_host() for i in indices])
         return self._last_expected_traj, sample_trajs
+    
+    def get_covariance(self):
+        return self.current_covariance
 
     def free_gpu_buffers(self, force_reset: bool = False):
         import gc

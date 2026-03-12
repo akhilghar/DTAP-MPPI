@@ -44,7 +44,7 @@ def bicycle_dynamics_host(x, u, dt, params, x_next=None):
     px_next = px + v * math.cos(theta) * dt
     py_next = py + v * math.sin(theta) * dt
     theta_next = theta + (v / L) * math.tan(delta) * dt
-    v_next = v + a * dt
+    v_next = max(0.0, v + a * dt)
 
     return np.array([px_next, py_next, theta_next, v_next], dtype=np.float32)
 

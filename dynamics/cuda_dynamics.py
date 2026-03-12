@@ -52,7 +52,7 @@ def bicycle_dynamics(x, u, dt, params, x_next):
     px_next = px + v * math.cos(theta) * dt
     py_next = py + v * math.sin(theta) * dt
     theta_next = theta + (v / L) * math.tan(delta) * dt
-    v_next = v + a * dt
+    v_next = max(0.0, v + a * dt)
     
     x_next[0] = px_next
     x_next[1] = py_next

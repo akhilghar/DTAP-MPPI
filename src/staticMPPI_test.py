@@ -40,7 +40,7 @@ if state_dim == 4:
     x_goal = np.array([10.0, 10.0, 0.0, 0.0])
 
 else:
-    Q_mod=np.diag([10.0, 10.0, 2.0])
+    Q_mod=np.diag([7.0, 7.0, 2.0])
     Qf_mod=np.diag([50.0, 50.0, 5.0])
     umin_mod = np.array([-3.0, -3.0])
     umax_mod = np.array([3.0, 3.0])
