@@ -10,15 +10,15 @@ from environments.dynamicEnv_deterministic import DeterministicEnv, Obstacle
 # ============================================================================
 # Setup Environment
 # ============================================================================
-
-env = DeterministicEnv(bounds=(-2, 12, -2, 12), robot_radius=0.25)
+corridor_width = 4.0
+env = DeterministicEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.2)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(1,8):
+for i in range(0,8):
     env.add_obstacle(
-        Obstacle(position=[np.random.randint(1.0, 10.0), np.random.randint(1.0, 10.0)], 
-                 radius=0.4+0.5*np.random.rand(),
+        Obstacle(position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
+                 radius=0.3+0.4*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0])
     )
 
@@ -27,7 +27,7 @@ for i in range(1,8):
 # ============================================================================
 
 # Define function used, reference this function exclusively
-model_name = "bicycle"  # "differential_drive", "ackermann", "bicycle"
+model_name = "differential_drive"  # "differential_drive", "ackermann", "bicycle"
 model = DYNAMICS_REGISTRY[model_name]
 
 model_md = model.metadata
@@ -45,8 +45,8 @@ if state_dim == 4:
     noise_mod = np.array([0.55, 0.175])
     ctrl_label_1 = "Acceleration"
     ctrl_label_2 = "Steering Angle"
-    x0 = np.array([0.0, 0.0, np.pi/2.1, 0.0])
-    x_goal = np.array([10.0, 10.0, 0.0, 0.0])
+    x0 = np.array([0.0, 0.0, np.pi/2, 0.0])
+    x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
     Q_mod=np.diag([7.0, 7.0, 2.0])
@@ -56,8 +56,8 @@ else:
     noise_mod = np.array([0.6, 0.6])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([0.0, 0.0, np.pi/2.1])
-    x_goal = np.array([10.0, 0.0, 0.0])
+    x0 = np.array([0.0, 0.0, np.pi/2])
+    x_goal = np.array([0.0, 20.0, np.pi/2])
 
 
 config = MPPIConfig(
@@ -91,14 +91,17 @@ mppi = MPPIDynObs(config, model.gpu, environment=env)
 
 trajectory = [x0.copy()]
 controls = []
+cov_log = []
 
 obstacle_history = []
+rollout_snapshots = {}  # step -> (expected_traj, sample_trajs), sampled every 20 steps
 
 x = x0.copy()
-num_steps = 300
+num_steps = 500
+num_safe = 0
 
 print("Running Dynamic MPPI Simulation...")
-
+sim_start_time = time.time()
 for step in range(num_steps):
 
     # --- Step environment first (obstacles move) ---
@@ -110,6 +113,10 @@ for step in range(num_steps):
     # --- Get MPPI control ---
     start = time.time()
     u, is_safe = mppi.get_control(x, x_goal)
+    if is_safe:
+        num_safe += 1
+
+    cov = mppi.get_covariance()
     end = time.time()
 
     # --- Apply dynamics ---
@@ -121,22 +128,34 @@ for step in range(num_steps):
 
     trajectory.append(x.copy())
     controls.append(u.copy())
+    cov_log.append(cov)
+
+    if state_dim == 4:
+        vel = x[3]
+    else:
+        vel = 0.5*u[0] + 0.5*u[1]
 
     # --- Goal check ---
-    if np.linalg.norm(x[:2] - x_goal[:2]) < 0.5:
+    if (np.linalg.norm(x[:2] - x_goal[:2]) < env.robot_radius) & (vel < 0.01):
         print(f"Reached goal at step {step}")
         break
 
     if step % 20 == 0:
+        rollout_snapshots[step] = mppi.get_rollout_snapshot(n=5)
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
+              f"covariance={cov}, "
               f"safe={is_safe}, "
-              f"time={end-start:.3f}s")
+              f"time per step={end-start:.3f}s")
 
 trajectory = np.array(trajectory)
 controls = np.array(controls)
 obstacle_history = np.array(obstacle_history)
+sim_end_time = time.time()
 
 print(f"Simulation complete: {len(trajectory)} steps")
+print(f"Safe Trajectory Rate: {num_safe/len(trajectory):.2f}")
+print(f"Total Simulation Time: {sim_end_time - sim_start_time:.2f} seconds")
+cov_log = np.array(cov_log)
 
 # ============================================================================
 # Visualization
@@ -180,6 +199,14 @@ for i in range(obstacle_history.shape[1]):
 # Trajectory trail
 traj_line, = ax.plot([], [], 'b-', linewidth=2)
 
+# Rollout visualization: sample trajectories + selected (weighted-mean) trajectory
+N_DISPLAY_ROLLOUTS = 5
+sample_rollout_lines = [
+    ax.plot([], [], color='orange', alpha=0.25, linewidth=0.8, zorder=1)[0]
+    for _ in range(N_DISPLAY_ROLLOUTS)
+]
+selected_rollout_line, = ax.plot([], [], color='lime', alpha=0.85, linewidth=1.5, zorder=2)
+
 # Goal
 ax.plot(x_goal[0], x_goal[1], 'r*', markersize=15)
 
@@ -207,7 +234,17 @@ def update(frame):
     traj_line.set_data(trajectory[:frame+1, 0],
                        trajectory[:frame+1, 1])
 
-    return [robot_patch, traj_line, heading_line] + obstacle_patches
+    # Update rollout lines using the most recent snapshot (every 20 frames)
+    snapshot_step = (frame // 20) * 20
+    if snapshot_step in rollout_snapshots:
+        exp_traj, sample_trajs = rollout_snapshots[snapshot_step]
+        if exp_traj is not None:
+            selected_rollout_line.set_data(exp_traj[:, 0], exp_traj[:, 1])
+        for j, line in enumerate(sample_rollout_lines):
+            line.set_data(sample_trajs[j, :, 0], sample_trajs[j, :, 1])
+
+    return ([robot_patch, traj_line, heading_line, selected_rollout_line]
+            + sample_rollout_lines + obstacle_patches)
 
 ani = animation.FuncAnimation(
     fig,
@@ -216,62 +253,52 @@ ani = animation.FuncAnimation(
     interval=config.dt * 1000,  # milliseconds
     blit=True
 )
-t_fin = time.time()
+t_fin = sim_end_time - sim_start_time
 plt.show()
-ani.save(f"./media/GIFs/mppi_animation_{model_name}_{t_fin:.2f}_det.gif", writer="pillow", fps=1/config.dt)
+ani.save(f"./media/GIFs/mppi_animation_{model_name}_{t_fin:.2f}_prob.gif", writer="pillow", fps=1/config.dt)
 print("Saved animated GIF of Robot.")
 
-fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+fig, axes = plt.subplots(3, 1, figsize=(14, 12))
 
-# Plot 1: Trajectory
-ax1 = axes[0, 0]
-xmin, xmax, ymin, ymax = env.bounds
-ax1.set_xlim(xmin, xmax)
-ax1.set_ylim(ymin, ymax)
-ax1.set_aspect("equal")
-
-# Draw obstacles at final state
-for obs in env.obstacles:
-    circle = plt.Circle(obs.position, obs.radius, color='red', alpha=0.5)
-    ax1.add_patch(circle)
-
-ax1.plot(trajectory[:, 0], trajectory[:, 1], 'b-', linewidth=2)
-ax1.plot(x0[0], x0[1], 'go', markersize=10)
-ax1.plot(x_goal[0], x_goal[1], 'r*', markersize=15)
-
-ax1.set_title("Dynamic MPPI Trajectory")
-ax1.grid(True)
-
-# Plot 2: Controls
-ax2 = axes[0, 1]
 time_vec = np.arange(len(controls)) * config.dt
-ax2.plot(time_vec, controls[:, 0], label='Control Input 1')
-ax2.plot(time_vec, controls[:, 1], label='Control Input 2')
-ax2.legend()
-ax2.grid(True)
-ax2.set_title("Control Inputs")
 
-# Plot 3: States
-ax3 = axes[1, 0]
-ax3.plot(time_vec, trajectory[:-1, 2], label='Heading')
+# Plot 1: Covariance Evolution
+ax1 = axes[0]
+ax1.set_xlabel("Time (s)")
+ax1.set_ylabel("Covariance")
+ax1.plot(time_vec, cov_log[:, 0], label='Control Input 1 Covariance')
+ax1.plot(time_vec, cov_log[:, 1], label='Control Input 2 Covariance')
+ax1.legend()
+ax1.grid(True)
+ax1.set_title("Covariance Evolution")
+
+# Plot 2: Robot Velocity
+ax2 = axes[1]
+ax2.set_xlabel("Time (s)")
+ax2.set_ylabel("Velocity (m/s)")
 if state_dim == 4:
-    ax3.plot(time_vec, trajectory[:-1, 3], label='Velocity')
+    ax2.plot(time_vec, trajectory[:-1, 3], label='Velocity')
 else:
     v_avg = 0.5*controls[:,0] + 0.5*controls[:,1]
-    ax3.plot(time_vec, v_avg, label='Velocity')
-ax3.legend()
-ax3.grid(True)
-ax3.set_title("State Evolution")
+    ax2.plot(time_vec, v_avg, label='Velocity')
+ax2.set_title("Robot Velocity")
+ax2.grid(True)
 
-# Plot 4: Distance to Goal
-ax4 = axes[1, 1]
-dist_to_goal = np.linalg.norm(trajectory[:, :2] - x_goal[:2], axis=1)
-ax4.plot(time_vec, dist_to_goal[:-1])
-ax4.set_title("Distance to Goal")
-ax4.grid(True)
+# Plot 3: Steering Angle
+ax3 = axes[2]
+ax3.set_xlabel("Time (s)")
+ax3.set_ylabel("Steering Angle (rad)")
+if state_dim == 4:
+    ax3.plot(time_vec, controls[:, 1], label='Steering Angle')
+    ax3.set_title("Steering Angle")
+    ax3.grid(True)
+else:
+    ax3.plot(time_vec, trajectory[:-1, 2], label='Steering Angle')
+    ax3.set_title("Steering Angle")
+    ax3.grid(True)
 
 plt.tight_layout()
-filename = f'./media/Visualizations/mppi_result_{model_name}_{t_fin:.2f}_dynDet.png'
+filename = f'./media/Visualizations/mppi_result_{model_name}_{t_fin:.2f}_dynProb.png'
 plt.savefig(filename, dpi=150)
 # plt.show()
 

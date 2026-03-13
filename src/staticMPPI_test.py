@@ -33,7 +33,7 @@ if state_dim == 4:
     Qf_mod=np.diag([50.0, 50.0, 5.0, 5.0])
     umin_mod = np.array([-3.0, -max_deg*np.pi/180])
     umax_mod = np.array([3.0, max_deg*np.pi/180])
-    noise_mod = np.array([0.5, 0.2])
+    noise_mod = np.array([0.2, 0.05])
     ctrl_label_1 = "Acceleration"
     ctrl_label_2 = "Steering Angle"
     x0 = np.array([0.0, 0.0, 0.0, 0.0])
@@ -44,7 +44,7 @@ else:
     Qf_mod=np.diag([50.0, 50.0, 5.0])
     umin_mod = np.array([-3.0, -3.0])
     umax_mod = np.array([3.0, 3.0])
-    noise_mod = np.array([0.3, 0.3])
+    noise_mod = np.array([0.1, 0.1])
     x0 = np.array([0.0, 0.0, 0.0])
     x_goal = np.array([0.0, 10.0, 0.0])
     ctrl_label_1 = "Left Wheel Velocity"
@@ -178,7 +178,7 @@ ax4.grid(True)
 ax4.set_title('Convergence to Goal')
 
 plt.tight_layout()
-filename = f'media/mppi_result_{model_name}_{x_goal[0]}_{x_goal[1]}_{x0[2]:.2f}_static.png'
+filename = f'media/Visualizations/mppi_result_{model_name}_{x_goal[0]}_{x_goal[1]}_{x0[2]:.2f}_static.png'
 plt.savefig(filename, dpi=150)
 plt.show()
 
