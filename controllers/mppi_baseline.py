@@ -1,10 +1,10 @@
 # mppi_baseline.py
 
 import numpy as np
-from numba import cuda, jit
-import math
+from numba import cuda
+from numba.cuda.random import create_xoroshiro128p_states
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 from controllers.cuda_kernels import *
 
@@ -89,9 +89,12 @@ class MPPIBaseline:
         print(f"CUDA devices: {cuda.gpus}")
 
         print(f"Compiling Rollout Kernel for dynamics: {metadata['name']}...")
-        self.rollout_kernel = make_rollout_kernel(dynamics_func, config.state_dim, config.control_dim)
+        self.rollout_kernel = make_rollout_kernel_coalesced(
+            dynamics_func, config.state_dim, config.control_dim
+        )
 
         self.u_nominal = np.zeros((config.horizon, config.control_dim), dtype=np.float32)
+        self._last_expected_traj = None
 
         self._allocate_gpu_memory()
 
@@ -101,36 +104,145 @@ class MPPIBaseline:
         control_dim = self.config.control_dim
         state_dim = self.config.state_dim
 
-        self.d_samples = cuda.device_array((num_samples, horizon, control_dim), dtype=np.float32)
+        self.d_samples = cuda.device_array((horizon, num_samples, control_dim), dtype=np.float32)
         self.d_trajectories = cuda.device_array((num_samples, horizon + 1, state_dim), dtype=np.float32)
         self.d_costs = cuda.device_array(num_samples, dtype=np.float32)
-        # device weight buffers (raw and normalized)
         self.d_weights = cuda.device_array(num_samples, dtype=np.float32)
         self.d_weights_norm = cuda.device_array(num_samples, dtype=np.float32)
-
-        # preallocate buffers used by safety and expected-value kernels
         self.d_min_dists = cuda.device_array(num_samples, dtype=np.float32)
         self.d_expected_traj = cuda.device_array((horizon + 1, state_dim), dtype=np.float32)
         self.d_expected_controls = cuda.device_array((horizon, control_dim), dtype=np.float32)
 
-        traj_bytes = self.d_trajectories.nbytes
-        cost_bytes = self.d_costs.nbytes
-        samples_bytes = self.d_samples.nbytes
-        weights_bytes = self.d_weights.nbytes
-        total_bytes = traj_bytes + cost_bytes + samples_bytes + weights_bytes
+        self.d_Q_diag = cuda.to_device(np.diag(self.config.Q).astype(np.float32))
+        self.d_R_diag = cuda.to_device(np.diag(self.config.R).astype(np.float32))
+        self.d_Qf_diag = cuda.to_device(np.diag(self.config.Qf).astype(np.float32))
+        self.d_params = cuda.to_device(self.config.dynamics_params.astype(np.float32))
+        self.d_u_min = cuda.to_device(self.config.u_min.astype(np.float32))
+        self.d_u_max = cuda.to_device(self.config.u_max.astype(np.float32))
+        self.d_noise_sigma = cuda.to_device(self.config.noise_sigma.astype(np.float32))
+
+        self.d_x0 = cuda.device_array(state_dim, dtype=np.float32)
+        self.d_x_goal = cuda.device_array(state_dim, dtype=np.float32)
+        self.d_u_nominal = cuda.device_array((horizon, control_dim), dtype=np.float32)
+
+        seed = int(np.random.randint(1, 2**31))
+        self._sample_rng_states = create_xoroshiro128p_states(num_samples, seed=seed)
+
+        self.d_dummy_vec2 = cuda.to_device(np.zeros((1, 2), dtype=np.float32))
+        self.d_dummy_float1 = cuda.to_device(np.zeros(1, dtype=np.float32))
+        self.d_dummy_int1 = cuda.to_device(np.zeros(1, dtype=np.int32))
+
+        self.d_obs_circles_positions = None
+        self.d_obs_circles_radii = None
+        self.d_obs_rects_positions = None
+        self.d_obs_rects_width = None
+        self.d_obs_rects_height = None
+        self.d_obs_rects_angles = None
+        self.d_obs_polys_vertices = None
+        self.d_obs_polys_starts = None
+        self.d_obs_polys_lengths = None
+
+        total_bytes = (
+            self.d_samples.nbytes + self.d_trajectories.nbytes +
+            self.d_costs.nbytes + self.d_weights.nbytes +
+            self.d_min_dists.nbytes + self.d_expected_traj.nbytes +
+            self.d_expected_controls.nbytes
+        )
         print(f"Allocated GPU memory: {total_bytes / 1e6:.2f} MB")
-    
-    # Sample control perturbations and add to nominal control sequence
-    def _generate_samples(self):
-        noise = np.random.normal(0, self.config.noise_sigma, size=(self.config.num_samples, self.config.horizon, self.config.control_dim)).astype(np.float32)
-        samples = self.u_nominal + noise
-        samples = np.clip(samples, self.config.u_min, self.config.u_max)
-        return samples
-    
-    # Helper function to retrieve obstacle data from the environment and prepare it for GPU use
+
     def _get_obstacle_data(self):
         obstacles = self.environment.get_obstacle_data()
         return obstacles
+
+    def _sync_device_array(self, attr_name: str, host_array: np.ndarray):
+        host_array = np.ascontiguousarray(host_array)
+        dev_array = getattr(self, attr_name, None)
+
+        if (
+            dev_array is None
+            or tuple(dev_array.shape) != tuple(host_array.shape)
+            or dev_array.dtype != host_array.dtype
+        ):
+            if dev_array is not None and hasattr(dev_array, 'close'):
+                try:
+                    dev_array.close()
+                except Exception:
+                    pass
+            dev_array = cuda.to_device(host_array)
+            setattr(self, attr_name, dev_array)
+        else:
+            cuda.to_device(host_array, to=dev_array)
+
+        return dev_array
+
+    def _sync_obstacle_buffers(self, obstacles):
+        circles = obstacles['circles']
+        rects = obstacles['rectangles']
+        polys = obstacles['polygons']
+
+        circle_count = int(circles['count'])
+        rect_count = int(rects['count'])
+        poly_count = int(polys['count'])
+
+        if circle_count > 0:
+            d_obs_circles_positions = self._sync_device_array(
+                'd_obs_circles_positions', circles['positions'].astype(np.float32)
+            )
+            d_obs_circles_radii = self._sync_device_array(
+                'd_obs_circles_radii', circles['radii'].astype(np.float32)
+            )
+        else:
+            d_obs_circles_positions = self.d_dummy_vec2
+            d_obs_circles_radii = self.d_dummy_float1
+
+        if rect_count > 0:
+            d_obs_rects_positions = self._sync_device_array(
+                'd_obs_rects_positions', rects['positions'].astype(np.float32)
+            )
+            d_obs_rects_width = self._sync_device_array(
+                'd_obs_rects_width', rects['widths'].astype(np.float32)
+            )
+            d_obs_rects_height = self._sync_device_array(
+                'd_obs_rects_height', rects['heights'].astype(np.float32)
+            )
+            d_obs_rects_angles = self._sync_device_array(
+                'd_obs_rects_angles', rects['angles'].astype(np.float32)
+            )
+        else:
+            d_obs_rects_positions = self.d_dummy_vec2
+            d_obs_rects_width = self.d_dummy_float1
+            d_obs_rects_height = self.d_dummy_float1
+            d_obs_rects_angles = self.d_dummy_float1
+
+        if poly_count > 0:
+            d_obs_polys_vertices = self._sync_device_array(
+                'd_obs_polys_vertices', polys['vertices_flat'].astype(np.float32)
+            )
+            d_obs_polys_starts = self._sync_device_array(
+                'd_obs_polys_starts', polys['starts'].astype(np.int32)
+            )
+            d_obs_polys_lengths = self._sync_device_array(
+                'd_obs_polys_lengths', polys['lengths'].astype(np.int32)
+            )
+        else:
+            d_obs_polys_vertices = self.d_dummy_vec2
+            d_obs_polys_starts = self.d_dummy_int1
+            d_obs_polys_lengths = self.d_dummy_int1
+
+        return {
+            'circle_positions': d_obs_circles_positions,
+            'circle_radii': d_obs_circles_radii,
+            'circle_count': circle_count,
+            'rect_positions': d_obs_rects_positions,
+            'rect_widths': d_obs_rects_width,
+            'rect_heights': d_obs_rects_height,
+            'rect_angles': d_obs_rects_angles,
+            'rect_count': rect_count,
+            'poly_vertices': d_obs_polys_vertices,
+            'poly_starts': d_obs_polys_starts,
+            'poly_lengths': d_obs_polys_lengths,
+            'poly_count': poly_count,
+        }
     
     # Warm-starts 
     def _rollout_nominal(self, x0: np.ndarray) -> np.ndarray:
@@ -139,124 +251,68 @@ class MPPIBaseline:
         return traj
     
     def solve(self, x0: np.ndarray, x_goal: np.ndarray, return_trajectory: bool = False, require_safe: bool = False):
-        samples = self._generate_samples() # Generate samples on CPU (small)
-        
-        d_samples = cuda.to_device(samples)
-        d_x0 = cuda.to_device(x0.astype(np.float32))
-        d_x_goal = cuda.to_device(x_goal.astype(np.float32))
-        d_params = cuda.to_device(self.config.dynamics_params.astype(np.float32))
-
-        d_Q_diag = cuda.to_device(np.diag(self.config.Q).astype(np.float32))
-        d_R_diag = cuda.to_device(np.diag(self.config.R).astype(np.float32))
-        d_Qf_diag = cuda.to_device(np.diag(self.config.Qf).astype(np.float32))
-
-        obstacles = self._get_obstacle_data()
-
-        # -------- Circles --------
-        circles = obstacles['circles']
-        circle_count = circles['count']
-
-        if circle_count > 0:
-            d_obs_circles_positions = cuda.to_device(circles['positions'])
-            d_obs_circles_radii = cuda.to_device(circles['radii'])
-        else:
-            d_obs_circles_positions = cuda.to_device(np.zeros((1,2), dtype=np.float32))
-            d_obs_circles_radii = cuda.to_device(np.zeros(1, dtype=np.float32))
-
-        d_obs_circles_count = int(circle_count)
-
-        # -------- Rectangles --------
-        rects = obstacles['rectangles']
-        rect_count = rects['count']
-
-        if rect_count > 0:
-            d_obs_rects_positions = cuda.to_device(rects['positions'])
-            d_obs_rects_width = cuda.to_device(rects['widths'])
-            d_obs_rects_height = cuda.to_device(rects['heights'])
-            d_obs_rects_angles = cuda.to_device(rects['angles'])
-        else:
-            d_obs_rects_positions = cuda.to_device(np.zeros((1,2), dtype=np.float32))
-            d_obs_rects_width = cuda.to_device(np.zeros(1, dtype=np.float32))
-            d_obs_rects_height = cuda.to_device(np.zeros(1, dtype=np.float32))
-            d_obs_rects_angles = cuda.to_device(np.zeros(1, dtype=np.float32))
-
-        d_obs_rects_count = int(rect_count)
-
-        # -------- Polygons --------
-        polys = obstacles['polygons']
-        poly_count = polys['count']
-
-        if poly_count > 0:
-            d_obs_polys_vertices = cuda.to_device(polys['vertices_flat'])
-            d_obs_polys_starts = cuda.to_device(polys['starts'])
-            d_obs_polys_lengths = cuda.to_device(polys['lengths'])
-        else:
-            d_obs_polys_vertices = cuda.to_device(np.zeros((1,2), dtype=np.float32))
-            d_obs_polys_starts = cuda.to_device(np.zeros(1, dtype=np.int32))
-            d_obs_polys_lengths = cuda.to_device(np.zeros(1, dtype=np.int32))
-
-        d_obs_polys_count = int(poly_count)
-
-
-        robot_radius = self.environment.robot_radius
+        cuda.to_device(x0.astype(np.float32), to=self.d_x0)
+        cuda.to_device(x_goal.astype(np.float32), to=self.d_x_goal)
+        cuda.to_device(self.u_nominal.astype(np.float32), to=self.d_u_nominal)
 
         threads_per_block = 256
         blocks_per_grid = (self.config.num_samples + threads_per_block - 1) // threads_per_block
 
+        generate_samples_kernel[blocks_per_grid, threads_per_block](
+            self._sample_rng_states,
+            self.d_samples,
+            self.d_u_nominal,
+            self.d_noise_sigma,
+            self.d_u_min,
+            self.d_u_max,
+            self.config.num_samples,
+            self.config.horizon,
+            self.config.control_dim,
+        )
+
+        obstacles = self._get_obstacle_data()
+        obstacle_buffers = self._sync_obstacle_buffers(obstacles)
+        robot_radius = self.environment.robot_radius
+
         self.rollout_kernel[blocks_per_grid, threads_per_block](
-            d_samples, self.d_trajectories, d_x0, d_params,
+            self.d_samples, self.d_trajectories, self.d_x0, self.d_params,
             self.config.dt, self.config.num_samples, self.config.horizon
         )
 
-        static_cost_kernel[blocks_per_grid, threads_per_block](
-            self.d_trajectories, d_samples, self.d_costs, d_x_goal, d_Q_diag, d_R_diag, d_Qf_diag,
-            d_obs_circles_positions, d_obs_circles_radii, d_obs_circles_count,
-            d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count, 
-            d_obs_polys_vertices, d_obs_polys_starts, d_obs_polys_lengths, d_obs_polys_count,
+        static_cost_min_dist_kernel[blocks_per_grid, threads_per_block](
+            self.d_trajectories, self.d_samples, self.d_costs, self.d_min_dists,
+            self.d_x_goal, self.d_Q_diag, self.d_R_diag, self.d_Qf_diag,
+            obstacle_buffers['circle_positions'], obstacle_buffers['circle_radii'], obstacle_buffers['circle_count'],
+            obstacle_buffers['rect_positions'], obstacle_buffers['rect_widths'], obstacle_buffers['rect_heights'], obstacle_buffers['rect_angles'], obstacle_buffers['rect_count'],
+            obstacle_buffers['poly_vertices'], obstacle_buffers['poly_starts'], obstacle_buffers['poly_lengths'], obstacle_buffers['poly_count'],
             self.config.d_safe, self.config.Q_obs, robot_radius,
             self.config.num_samples, self.config.horizon, self.config.state_dim, self.config.control_dim, self.environment.bounds
         )
 
-        # Copy costs to host (small) for CPU weighting
         costs = self.d_costs.copy_to_host()
 
-        num_samples = self.config.num_samples
         is_safe = True
 
         if require_safe:
-            # Compute per-sample minimum clearance on GPU and copy back just the distances
-            d_min_dists = cuda.device_array(num_samples, dtype=np.float32)
-            static_min_distance_kernel[blocks_per_grid, threads_per_block](
-                self.d_trajectories, d_min_dists,
-                d_obs_circles_positions, d_obs_circles_radii, d_obs_circles_count,
-                d_obs_rects_positions, d_obs_rects_width, d_obs_rects_height, d_obs_rects_angles, d_obs_rects_count,
-                d_obs_polys_vertices, d_obs_polys_starts, d_obs_polys_lengths, d_obs_polys_count,
-                robot_radius, self.config.num_samples, self.config.horizon
-            )
-
-            min_dists = d_min_dists.copy_to_host()
+            min_dists = self.d_min_dists.copy_to_host()
             safe_mask = min_dists >= self.config.d_safe
 
             if not np.any(safe_mask):
-                # No fully-safe samples — pick the sample with maximum clearance
                 best_idx = int(np.argmax(min_dists))
-                u_opt = samples[best_idx, 0, :].astype(np.float32)
-                try:
-                    # copy only the selected trajectory to host
-                    traj_best = self.d_trajectories[best_idx].copy_to_host()
-                    self.u_nominal = samples[best_idx].copy()
-                except Exception:
-                    traj_best = None
+                samples_host = self.d_samples.copy_to_host()
+                u_nominal_best = samples_host[:, best_idx, :].astype(np.float32)
+                u_opt = u_nominal_best[0, :]
+                self.u_nominal = u_nominal_best
+                traj_best = self.d_trajectories[best_idx].copy_to_host() if return_trajectory else None
+                self._last_expected_traj = traj_best
                 is_safe = False
                 if return_trajectory:
                     return u_opt, traj_best, is_safe
-                else:
-                    return u_opt, None, is_safe
+                return u_opt, None, is_safe
+
             else:
-                # Penalize unsafe samples so they receive negligible weight
                 costs[~safe_mask] += 1e6
 
-        # Compute weights on CPU (softmin)
         min_cost = np.min(costs)
         weights = np.exp(-(costs - min_cost) / max(1e-8, self.config.lambda_)).astype(np.float32)
         weights_sum = np.sum(weights)
@@ -265,47 +321,36 @@ class MPPIBaseline:
         else:
             weights = weights / weights_sum
 
-        u_opt = np.sum(samples[:, 0, :] * weights[:, np.newaxis], axis=0).astype(np.float32)
+        cuda.to_device(weights, to=self.d_weights)
 
-        # Compute expected trajectory and nominal controls on GPU using the computed weights
-        d_weights_dev = cuda.to_device(weights)
-        d_expected_traj = cuda.device_array((self.config.horizon + 1, self.config.state_dim), dtype=np.float32)
-        total_traj_elems = (self.config.horizon + 1) * self.config.state_dim
-        blocks_traj = (total_traj_elems + threads_per_block - 1) // threads_per_block
-        expected_trajectory_kernel[blocks_traj, threads_per_block](
-            self.d_trajectories, d_weights_dev, d_expected_traj,
-            self.config.num_samples, self.config.horizon, self.config.state_dim
-        )
-
-        d_expected_controls = cuda.device_array((self.config.horizon, self.config.control_dim), dtype=np.float32)
         total_ctrl_elems = self.config.horizon * self.config.control_dim
-        blocks_ctrl = (total_ctrl_elems + threads_per_block - 1) // threads_per_block
-        expected_controls_kernel[blocks_ctrl, threads_per_block](
-            d_samples, d_weights_dev, d_expected_controls,
+        expected_controls_coalesced_kernel[total_ctrl_elems, threads_per_block](
+            self.d_samples, self.d_weights, self.d_expected_controls,
             self.config.num_samples, self.config.horizon, self.config.control_dim
         )
 
-        trajectory = d_expected_traj.copy_to_host()
-        u_nominal_new = d_expected_controls.copy_to_host()
-        self.u_nominal = u_nominal_new
+        trajectory = None
+        if return_trajectory:
+            total_traj_elems = (self.config.horizon + 1) * self.config.state_dim
+            expected_trajectory_kernel[total_traj_elems, threads_per_block](
+                self.d_trajectories, self.d_weights, self.d_expected_traj,
+                self.config.num_samples, self.config.horizon, self.config.state_dim
+            )
+            trajectory = self.d_expected_traj.copy_to_host()
+            self._last_expected_traj = trajectory
+        else:
+            self._last_expected_traj = None
+
+        expected_controls = self.d_expected_controls.copy_to_host()
+        self.u_nominal = expected_controls
+        u_opt = expected_controls[0, :].astype(np.float32)
 
         if return_trajectory:
             return u_opt, trajectory, is_safe
-        else:
-            return u_opt, None, is_safe
+        return u_opt, None, is_safe
         
     def get_control(self, x0: np.ndarray, x_goal: np.ndarray, require_safe: bool = True):
-        u_opt, trajectory, is_safe = self.solve(x0, x_goal, return_trajectory=True, require_safe=require_safe)
-
-        # Double-check expected trajectory clearance if available
-        if require_safe and trajectory is not None:
-            for t in range(trajectory.shape[0]):
-                pos = trajectory[t, :2]
-                dist = self.environment.get_nearest_obstacle_distance(pos)
-                if dist < self.config.d_safe:
-                    is_safe = False
-                    break
-
+        u_opt, _, is_safe = self.solve(x0, x_goal, return_trajectory=False, require_safe=require_safe)
         return u_opt, is_safe
 
     def free_gpu_buffers(self, force_reset: bool = False):
@@ -320,7 +365,14 @@ class MPPIBaseline:
 
         names = (
             'd_samples', 'd_trajectories', 'd_costs', 'd_weights', 'd_weights_norm',
-            'd_min_dists', 'd_expected_traj', 'd_expected_controls'
+            'd_min_dists', 'd_expected_traj', 'd_expected_controls',
+            'd_Q_diag', 'd_R_diag', 'd_Qf_diag', 'd_params',
+            'd_u_min', 'd_u_max', 'd_noise_sigma',
+            'd_x0', 'd_x_goal', 'd_u_nominal', '_sample_rng_states',
+            'd_dummy_vec2', 'd_dummy_float1', 'd_dummy_int1',
+            'd_obs_circles_positions', 'd_obs_circles_radii',
+            'd_obs_rects_positions', 'd_obs_rects_width', 'd_obs_rects_height', 'd_obs_rects_angles',
+            'd_obs_polys_vertices', 'd_obs_polys_starts', 'd_obs_polys_lengths'
         )
 
         for n in names:

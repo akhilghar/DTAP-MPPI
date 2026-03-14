@@ -53,7 +53,7 @@ if state_dim == 4:
 else:
     Q_mod=np.diag([7.0, 7.0, 1.5])
     Qf_mod=np.diag([40.0, 40.0, 5.0])
-    R_mod = np.eye(control_dim) * 10.0
+    R_mod = np.eye(control_dim) * 5.0
     umin_mod = np.array([-4.0, -4.0])
     umax_mod = np.array([4.0, 4.0])
     noise_mod = np.array([0.5, 0.5])

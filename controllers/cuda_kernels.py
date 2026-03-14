@@ -118,76 +118,6 @@ def distance_to_polygon(px, py, poly_vertices, start, num_vertices):
     return min_dist
 
 @cuda.jit
-def static_cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
-                circle_positions, circle_radii, num_circles,
-                rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
-                poly_vertices, poly_starts, poly_lengths, num_polys,
-                d_safe, Q_obs, robot_radius, num_samples, horizon, state_dim, control_dim, bounds):
-    
-    idx = cuda.grid(1)
-    
-    if idx < num_samples:
-        cost = 0.0
-        for t in range(horizon):
-            # State and control cost
-            x = trajectories[idx, t]
-            u = samples[idx, t]
-            state_cost = 0.0
-            control_cost = 0.0
-            for i in range(state_dim):
-                state_cost += Q_diag[i] * (x[i] - x_goal[i]) ** 2
-            for i in range(control_dim):
-                control_cost += R_diag[i] * u[i] ** 2
-            cost += state_cost + control_cost
-            
-            # Obstacle cost based on position (assuming first two dimensions are position)
-            px, py = x[0], x[1]
-            
-            # Circle obstacles
-            for c in range(num_circles):
-                obs_px = circle_positions[c, 0]
-                obs_py = circle_positions[c, 1]
-                dist = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
-                if dist < d_safe:
-                    cost += Q_obs * (d_safe - dist + robot_radius)
-
-            # Rectangle obstacles
-            for r in range(num_rects):
-                dist = distance_to_rectangle(px, py, rect_positions[r, 0], rect_positions[r, 1], rect_widths[r], rect_heights[r])
-                if dist < d_safe:
-                    cost += Q_obs * (d_safe - dist + robot_radius)
-
-            # Polygon obstacles
-            for p in range(num_polys):
-                start = poly_starts[p]
-                length = poly_lengths[p]
-                if is_in_polygon(px, py, poly_vertices, start, length):
-                    cost += Q_obs * (d_safe + robot_radius)  # Inside polygon is very bad
-                else:
-                    dist = distance_to_polygon(px, py, poly_vertices, start, length)
-                    if dist < d_safe:
-                        cost += Q_obs * (d_safe - dist + robot_radius)
-            
-            # Boundary cost
-            if px < bounds[0] + robot_radius:
-                cost += Q_obs**2 * (bounds[0] + robot_radius - px)
-            if px > bounds[1] - robot_radius:
-                cost += Q_obs**2 * (px - (bounds[1] - robot_radius))
-            if py < bounds[2] + robot_radius:
-                cost += Q_obs**2 * (bounds[2] + robot_radius - py)
-            if py > bounds[3] - robot_radius:
-                cost += Q_obs**2 * (py - (bounds[3] - robot_radius))
-
-        # Terminal state cost
-        x_final = trajectories[idx, horizon]
-        terminal_cost = 0.0
-        for i in range(state_dim):
-            terminal_cost += Qf_diag[i] * (x_final[i] - x_goal[i]) ** 2
-        cost += terminal_cost
-        
-        costs[idx] = cost
-
-@cuda.jit
 def compute_weights_kernel(costs, weights, lambda_, num_samples):
     idx = cuda.grid(1)
     if idx < num_samples:
@@ -212,44 +142,93 @@ def normalize_weights_kernel(weights, normalized_weights, num_samples):
 
 
 @cuda.jit
-def static_min_distance_kernel(trajectories, min_dists,
-                        circle_positions, circle_radii, num_circles,
-                        rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
-                        poly_vertices, poly_starts, poly_lengths, num_polys,
-                        robot_radius, num_samples, horizon):
+def static_cost_min_dist_kernel(
+        trajectories, samples, costs, min_dists,
+        x_goal, Q_diag, R_diag, Qf_diag,
+        circle_positions, circle_radii, num_circles,
+        rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
+        poly_vertices, poly_starts, poly_lengths, num_polys,
+        d_safe, Q_obs, robot_radius,
+        num_samples, horizon, state_dim, control_dim, bounds):
+    """
+    Single-pass static obstacle kernel for the baseline controller.
+
+    samples layout: (horizon, num_samples, control_dim)
+    trajectories layout: (num_samples, horizon + 1, state_dim)
+    """
     idx = cuda.grid(1)
     if idx < num_samples:
+        cost = 0.0
         min_d = 1e9
-        # iterate over trajectory timesteps
-        for t in range(horizon + 1):
+
+        for t in range(horizon):
+            state_cost = 0.0
+            for i in range(state_dim):
+                diff = trajectories[idx, t, i] - x_goal[i]
+                state_cost += Q_diag[i] * diff * diff
+
+            control_cost = 0.0
+            for i in range(control_dim):
+                u = samples[t, idx, i]
+                control_cost += R_diag[i] * u * u
+
+            cost += state_cost + control_cost
+
             px = trajectories[idx, t, 0]
             py = trajectories[idx, t, 1]
 
-            # circles
             for c in range(num_circles):
                 obs_px = circle_positions[c, 0]
                 obs_py = circle_positions[c, 1]
                 dist = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
+                if dist < d_safe:
+                    cost += Q_obs * (d_safe - dist + robot_radius)
                 if dist < min_d:
                     min_d = dist
 
-            # rectangles
             for r in range(num_rects):
-                d = distance_to_rectangle(px, py, rect_positions[r, 0], rect_positions[r, 1], rect_widths[r], rect_heights[r]) - robot_radius
-                if d < min_d:
-                    min_d = d
+                dist = distance_to_rectangle(
+                    px, py,
+                    rect_positions[r, 0], rect_positions[r, 1],
+                    rect_widths[r], rect_heights[r]
+                )
+                if dist < d_safe:
+                    cost += Q_obs * (d_safe - dist + robot_radius)
+                d_clr = dist - robot_radius
+                if d_clr < min_d:
+                    min_d = d_clr
 
-            # polygons
             for p in range(num_polys):
                 start = poly_starts[p]
                 length = poly_lengths[p]
                 if is_in_polygon(px, py, poly_vertices, start, length):
-                    d = -1.0
+                    cost += Q_obs * (d_safe + robot_radius)
+                    if -1.0 < min_d:
+                        min_d = -1.0
                 else:
-                    d = distance_to_polygon(px, py, poly_vertices, start, length) - robot_radius
-                if d < min_d:
-                    min_d = d
+                    dist = distance_to_polygon(px, py, poly_vertices, start, length)
+                    if dist < d_safe:
+                        cost += Q_obs * (d_safe - dist + robot_radius)
+                    d_clr = dist - robot_radius
+                    if d_clr < min_d:
+                        min_d = d_clr
 
+            if px < bounds[0] + robot_radius:
+                cost += Q_obs ** 2 * (bounds[0] + robot_radius - px)
+            if px > bounds[1] - robot_radius:
+                cost += Q_obs ** 2 * (px - (bounds[1] - robot_radius))
+            if py < bounds[2] + robot_radius:
+                cost += Q_obs ** 2 * (bounds[2] + robot_radius - py)
+            if py > bounds[3] - robot_radius:
+                cost += Q_obs ** 2 * (py - (bounds[3] - robot_radius))
+
+        terminal_cost = 0.0
+        for i in range(state_dim):
+            diff = trajectories[idx, horizon, i] - x_goal[i]
+            terminal_cost += Qf_diag[i] * diff * diff
+        cost += terminal_cost
+
+        costs[idx] = cost
         min_dists[idx] = min_d
 
 
@@ -363,144 +342,6 @@ def obs_mc_rollout_kernel(rng_states, positions, velocities, speeds, radii,
 
         obs_trajs[r, n, k, 0] = px
         obs_trajs[r, n, k, 1] = py
-
-
-@cuda.jit
-def mc_cost_kernel(trajectories, samples, costs, x_goal, Q_diag, R_diag, Qf_diag,
-                   circle_pred, circle_radii, num_circles, num_obs_rollouts,
-                   rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
-                   poly_vertices, poly_starts, poly_lengths, num_polys,
-                   d_safe, Q_obs, robot_radius,
-                   num_samples, horizon, state_dim, control_dim, bounds):
-    """
-    MPPI cost kernel with Monte Carlo obstacle evaluation.
-
-    circle_pred has shape (R, N, horizon, 2): circle_pred[r, c, t, xy]
-    The circle obstacle cost is the average over all R rollouts, giving an
-    unbiased estimate of E[obstacle_cost] under the stochastic obstacle model.
-    Rectangles and polygons remain deterministic.
-    """
-    idx = cuda.grid(1)
-
-    if idx < num_samples:
-        cost = 0.0
-
-        for t in range(horizon):
-            x = trajectories[idx, t]
-            u = samples[idx, t]
-
-            state_cost   = 0.0
-            control_cost = 0.0
-            for i in range(state_dim):
-                state_cost += Q_diag[i] * (x[i] - x_goal[i]) ** 2
-            for i in range(control_dim):
-                control_cost += R_diag[i] * u[i] ** 2
-            cost += state_cost + control_cost
-
-            px = x[0]
-            py = x[1]
-
-            # MC circle cost — average over R obstacle rollouts
-            obs_cost = 0.0
-            for r in range(num_obs_rollouts):
-                for c in range(num_circles):
-                    obs_px = circle_pred[r, c, t, 0]
-                    obs_py = circle_pred[r, c, t, 1]
-                    dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
-                    if dist < d_safe:
-                        obs_cost += Q_obs * (d_safe - dist + robot_radius)
-            if num_obs_rollouts > 0:
-                cost += obs_cost / num_obs_rollouts
-
-            # Deterministic rectangle cost
-            for r in range(num_rects):
-                dist = distance_to_rectangle(px, py,
-                    rect_positions[r, 0], rect_positions[r, 1],
-                    rect_widths[r], rect_heights[r])
-                if dist < d_safe:
-                    cost += Q_obs * (d_safe - dist + robot_radius)
-
-            # Deterministic polygon cost
-            for p in range(num_polys):
-                start  = poly_starts[p]
-                length = poly_lengths[p]
-                if is_in_polygon(px, py, poly_vertices, start, length):
-                    cost += Q_obs * (d_safe + robot_radius)
-                else:
-                    dist = distance_to_polygon(px, py, poly_vertices, start, length)
-                    if dist < d_safe:
-                        cost += Q_obs * (d_safe - dist + robot_radius)
-
-            # Boundary cost
-            if px < bounds[0] + robot_radius:
-                cost += Q_obs ** 2 * (bounds[0] + robot_radius - px)
-            if px > bounds[1] - robot_radius:
-                cost += Q_obs ** 2 * (px - (bounds[1] - robot_radius))
-            if py < bounds[2] + robot_radius:
-                cost += Q_obs ** 2 * (bounds[2] + robot_radius - py)
-            if py > bounds[3] - robot_radius:
-                cost += Q_obs ** 2 * (py - (bounds[3] - robot_radius))
-
-        # Terminal cost
-        x_final      = trajectories[idx, horizon]
-        terminal_cost = 0.0
-        for i in range(state_dim):
-            terminal_cost += Qf_diag[i] * (x_final[i] - x_goal[i]) ** 2
-        cost += terminal_cost
-
-        costs[idx] = cost
-
-
-@cuda.jit
-def mc_min_dist_kernel(trajectories, min_dists,
-                       circle_pred, circle_radii, num_circles, num_obs_rollouts,
-                       rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
-                       poly_vertices, poly_starts, poly_lengths, num_polys,
-                       robot_radius, num_samples, horizon):
-    """
-    Per-sample minimum clearance kernel with MC obstacle evaluation.
-
-    circle_pred has shape (R, N, horizon, 2).
-    Takes the worst-case (minimum) clearance over all R rollouts, which is
-    the appropriate conservative bound for safety checking.
-    """
-    idx = cuda.grid(1)
-
-    if idx < num_samples:
-        min_d = 1e9
-
-        for t in range(horizon):
-            px = trajectories[idx, t, 0]
-            py = trajectories[idx, t, 1]
-
-            # Worst-case over all obstacle rollouts
-            for r in range(num_obs_rollouts):
-                for c in range(num_circles):
-                    obs_px = circle_pred[r, c, t, 0]
-                    obs_py = circle_pred[r, c, t, 1]
-                    dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
-                    if dist < min_d:
-                        min_d = dist
-
-            for r in range(num_rects):
-                d = distance_to_rectangle(px, py,
-                    rect_positions[r, 0], rect_positions[r, 1],
-                    rect_widths[r], rect_heights[r]) - robot_radius
-                if d < min_d:
-                    min_d = d
-
-            for p in range(num_polys):
-                start  = poly_starts[p]
-                length = poly_lengths[p]
-                if is_in_polygon(px, py, poly_vertices, start, length):
-                    d = -1.0
-                else:
-                    d = distance_to_polygon(px, py, poly_vertices, start, length) - robot_radius
-                if d < min_d:
-                    min_d = d
-
-        min_dists[idx] = min_d
-
 
 # ---------------------------------------------------------------------------
 # Coalesced-layout kernels used by MPPIDynObs

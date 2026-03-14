@@ -251,7 +251,7 @@ class ProbabilisticEnv:
 
         for obs in self.obstacles:
             dist = np.linalg.norm(position[:2] - obs.position)
-            if dist <= obs.radius + self.robot_radius - 0.05:
+            if dist <= obs.radius + self.robot_radius + 0.01:  # small buffer
                 return True
 
         return False
