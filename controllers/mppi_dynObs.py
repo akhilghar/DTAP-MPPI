@@ -98,6 +98,8 @@ class MPPIDynObs:
 
         self.config = config
         self.environment = environment
+        xmin, _, ymin, _ = self.environment.bounds
+        self.terrain_info = np.array([xmin, ymin, self.environment.dx, self.environment.dy], dtype=np.float32)
 
         self.config.state_dim   = metadata['state_dim']
         self.config.control_dim = metadata['control_dim']
@@ -185,12 +187,16 @@ class MPPIDynObs:
         self.d_dummy_float1 = cuda.to_device(np.zeros(1,      dtype=np.float32))
         self.d_dummy_int1   = cuda.to_device(np.zeros(1,      dtype=np.int32))
 
+        self.d_terrain = cuda.to_device(self.environment.terrain.astype(np.float32))
+        self.d_terrain_info = cuda.to_device(self.terrain_info)
+
         self._last_expected_traj = None
 
         total_bytes = (
             self.d_samples.nbytes + self.d_trajectories.nbytes +
             self.d_costs.nbytes   + self.d_min_dists.nbytes    +
-            self.d_weights.nbytes + self.d_obs_rollouts.nbytes
+            self.d_weights.nbytes + self.d_obs_rollouts.nbytes +
+            self.d_terrain.nbytes + self.d_terrain_info.nbytes
         )
         print(f"Allocated GPU memory: {total_bytes / 1e6:.2f} MB")
 
@@ -301,7 +307,7 @@ class MPPIDynObs:
         # ---- Trajectory rollout ----
         self.rollout_kernel[blocks, threads](
             self.d_samples, self.d_trajectories, self.d_x0, self.d_params,
-            self.config.dt, self.config.num_samples, self.config.horizon,
+            self.config.dt, self.environment.terrain, self.terrain_info, self.config.num_samples, self.config.horizon,
         )
 
         # ---- Single-pass cost + min_dist ----
@@ -388,8 +394,8 @@ class MPPIDynObs:
         expected_controls = self.d_expected_controls.copy_to_host()   # (H, C)
         # print(expected_controls)
 
-        window_size = 11
-        window_deg = 4
+        window_size = 20
+        window_deg = 3
         self.u_nominal[:, 0] = savgol_filter(expected_controls[:, 0], window_size, window_deg)
         self.u_nominal[:, 1] = savgol_filter(expected_controls[:, 1], window_size, window_deg)
         u_opt = expected_controls[0, :].astype(np.float32)

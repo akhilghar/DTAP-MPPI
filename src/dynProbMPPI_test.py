@@ -10,17 +10,18 @@ from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, Ob
 # ============================================================================
 # Setup Environment
 # ============================================================================
-corridor_width = 4.0
-env = ProbabilisticEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.2)
+# corridor_width = 4.0
+env = ProbabilisticEnv(bounds=(-2, 12, -2, 12), robot_radius=0.3)
+env.generate_terrain()
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,8):
+for i in range(0,6):
     env.add_obstacle(
-        Obstacle(position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
+        Obstacle(position=[np.random.randint(1.5, 11.0), np.random.randint(1.5, 11.0)], 
                  radius=0.3+0.4*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
-                 mode=ObstacleMode.APATHETIC)
+                 mode=ObstacleMode.AVOIDANT)
     )
 
 # ============================================================================
@@ -51,23 +52,23 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([7.0, 7.0, 1.5])
-    Qf_mod=np.diag([40.0, 40.0, 5.0])
-    R_mod = np.eye(control_dim) * 5.0
-    umin_mod = np.array([-4.0, -4.0])
-    umax_mod = np.array([4.0, 4.0])
+    Q_mod=np.diag([7.0, 7.0, 1.5, 5.0, 5.0])
+    Qf_mod=np.diag([40.0, 40.0, 5.0, 20.0, 20.0])
+    R_mod = np.eye(control_dim) * 8.0
+    umin_mod = np.array([-2.0, -2.0])
+    umax_mod = np.array([2.0, 2.0])
     noise_mod = np.array([0.5, 0.5])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([0.0, 0.0, 0.0])
-    x_goal = np.array([0.0, 20.0, 0.0])
+    x0 = np.array([0.0, 0.0, np.pi/4, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])
 
 
 config = MPPIConfig(
     num_samples=20000,
     horizon=50,
     dt=0.05,
-    lambda_=15.0, # increase temperature for smoother trajectory
+    lambda_=50.0, # increase temperature for smoother trajectory
 
     Q=Q_mod,
     Qf=Qf_mod,
@@ -76,7 +77,7 @@ config = MPPIConfig(
     Q_obs=250.0,
     d_safe=env.robot_radius + 0.1,
 
-    dynamics_params=np.array([1.0]),
+    dynamics_params=np.array([0.6, 0.1]),
 
     u_min=umin_mod,
     u_max=umax_mod,
@@ -115,7 +116,7 @@ for step in range(num_steps):
 
     # --- Get MPPI control ---
     start = time.time()
-    u, is_safe = mppi.get_control(x, x_goal)
+    u, is_safe = mppi.get_control(x, x_goal, require_safe=True)
     if is_safe:
         num_safe += 1
 
@@ -123,7 +124,7 @@ for step in range(num_steps):
     end = time.time()
 
     # --- Apply dynamics ---
-    x = model.cpu(x, u, config.dt, config.dynamics_params)
+    x = model.cpu(x, u, config.dt, config.dynamics_params, env.terrain, mppi.terrain_info)
 
     if env.check_for_collision(x[:2]):
         print("FATAL: Robot has been killed by the environment. Terminating simulation.")
@@ -165,6 +166,7 @@ cov_log = np.array(cov_log)
 # ============================================================================
 
 import matplotlib.animation as animation
+from matplotlib import colors
 from matplotlib.patches import Circle, Rectangle
 
 fig, ax = plt.subplots(figsize=(8, 8))
@@ -173,6 +175,27 @@ ax.set_aspect('equal')
 xmin, xmax, ymin, ymax = env.bounds
 ax.set_xlim(xmin, xmax)
 ax.set_ylim(ymin, ymax)
+
+if env.terrain is not None:
+    terrain_min = float(np.min(env.terrain))
+    terrain_max = float(np.max(env.terrain))
+    if terrain_min < 0.0 < terrain_max:
+        terrain_norm = colors.TwoSlopeNorm(vmin=terrain_min, vcenter=0.0, vmax=terrain_max)
+    else:
+        terrain_norm = colors.Normalize(vmin=terrain_min, vmax=terrain_max)
+
+    terrain_map = ax.imshow(
+        env.terrain.T,
+        extent=(xmin, xmax, ymin, ymax),
+        origin='lower',
+        cmap='terrain',
+        norm=terrain_norm,
+        alpha=0.65,
+        interpolation='bilinear',
+        zorder=0,
+    )
+    colorbar = fig.colorbar(terrain_map, ax=ax, pad=0.02, shrink=0.85)
+    colorbar.set_label('Terrain elevation')
 
 # Draw boundary
 ax.add_patch(Rectangle((xmin, ymin),

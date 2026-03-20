@@ -74,7 +74,7 @@ config = MPPIConfig(
     Q_obs=250.0,
     d_safe=env.robot_radius + 0.1,
 
-    dynamics_params=np.array([1.0]),
+    dynamics_params=np.array([0.2]),
 
     u_min=umin_mod,
     u_max=umax_mod,

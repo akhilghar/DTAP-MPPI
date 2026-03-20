@@ -174,6 +174,10 @@ class ProbabilisticEnv:
         self.robot_radius = robot_radius
         self.obstacles: List[Obstacle] = []
 
+        self.terrain = None  # Placeholder for future terrain-aware behavior
+        self.dx = 0.5 # Terrain grid resolution in x direction
+        self.dy = 0.5 # Terrain grid resolution in y direction
+
     def add_obstacle(self, obstacle: Obstacle) -> None:
         self.obstacles.append(obstacle)
 
@@ -366,6 +370,12 @@ class ProbabilisticEnv:
             all_trajs[:, :, k, :] = pos          # store all R positions at step k
 
         return all_trajs
+
+    def generate_terrain(self) -> None:
+        xmin, xmax, ymin, ymax = self.bounds
+        terrain_size_x = int((xmax - xmin) / self.dx)
+        terrain_size_y = int((ymax - ymin) / self.dy)
+        self.terrain = 0.1*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
 
     def get_visualization_data(self) -> dict:
         return {

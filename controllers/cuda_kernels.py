@@ -1,3 +1,5 @@
+from typing import Callable
+
 from numba import cuda, jit, float32 as numba_float32
 from numba.cuda.random import xoroshiro128p_uniform_float32, xoroshiro128p_normal_float32
 import numpy as np
@@ -354,7 +356,7 @@ def make_rollout_kernel_coalesced(dynamics_func, state_dim, control_dim):
     trajectories layout unchanged: (num_samples, horizon+1, state_dim).
     """
     @cuda.jit
-    def rollout_cuda_coalesced(samples, trajectories, x0, params, dt, num_samples, horizon):
+    def rollout_cuda_coalesced(samples, trajectories, x0, params, dt, terrain, terrain_info, num_samples, horizon):
         idx = cuda.grid(1)
         if idx < num_samples:
             for i in range(state_dim):
@@ -370,7 +372,7 @@ def make_rollout_kernel_coalesced(dynamics_func, state_dim, control_dim):
                     u[i] = samples[t, idx, i]      # (H, N, C) layout
 
                 x_next = cuda.local.array(state_dim, dtype=np.float32)
-                dynamics_func(x, u, dt, params, x_next)
+                dynamics_func(x, u, dt, params, terrain, terrain_info, x_next)
 
                 for i in range(state_dim):
                     trajectories[idx, t + 1, i] = x_next[i]
