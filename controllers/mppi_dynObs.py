@@ -14,6 +14,7 @@ from controllers.cuda_kernels import (
     obs_mc_rollout_kernel,
     expected_trajectory_kernel,
     expected_controls_coalesced_kernel,
+    sample_terrain_kernel
 )
 
 
@@ -39,6 +40,15 @@ class MPPIConfig:
     d_safe: float = 0.5   # Safe distance from obstacles
     obs_cost_type: str = 'barrier'
 
+    # Terrain parameters
+    Q_slope: float = 15.0  # Cost weight for terrain slope (if used in dynamics)
+    Q_elev: float = 4.0   # Cost weight for elevation (if used in dynamics)
+
+    # Terrain sensing parameters
+    sensor_radius: float = 1.0
+    sensor_offset: float = 1.5
+    n_terrain_points: int = 100  # Number of points to sample for terrain estimation
+
     # Dynamics parameters
     dynamics_params: np.ndarray = None
 
@@ -54,7 +64,7 @@ class MPPIConfig:
     covariance_decay: float = 0.7       # per-step decay rate back toward base when recovering
 
     # Probabilistic obstacle prediction parameters
-    obs_pred_rollouts: int = 50          # MC rollouts for GPU obstacle trajectory prediction
+    obs_pred_rollouts: int = 40          # MC rollouts for GPU obstacle trajectory prediction
     obs_direction_change_prob: float = 0.05
     max_obstacles: int = 20              # capacity for preallocated obstacle GPU buffers
 
@@ -187,8 +197,14 @@ class MPPIDynObs:
         self.d_dummy_float1 = cuda.to_device(np.zeros(1,      dtype=np.float32))
         self.d_dummy_int1   = cuda.to_device(np.zeros(1,      dtype=np.int32))
 
+        # ---- Terrain buffers ----
         self.d_terrain = cuda.to_device(self.environment.terrain.astype(np.float32))
         self.d_terrain_info = cuda.to_device(self.terrain_info)
+
+        self.d_terrain_xy = cuda.device_array((self.config.n_terrain_points, 2), dtype=np.float32)
+        self.d_terrain_elev = cuda.device_array(self.config.n_terrain_points, dtype=np.float32)
+        terrain_seed = int(np.random.randint(1, 2**31))
+        self._terrain_rng_states = create_xoroshiro128p_states(self.config.n_terrain_points, seed=terrain_seed)
 
         self._last_expected_traj = None
 
@@ -307,7 +323,30 @@ class MPPIDynObs:
         # ---- Trajectory rollout ----
         self.rollout_kernel[blocks, threads](
             self.d_samples, self.d_trajectories, self.d_x0, self.d_params,
-            self.config.dt, self.environment.terrain, self.terrain_info, self.config.num_samples, self.config.horizon,
+            self.config.dt, self.d_terrain, self.d_terrain_info, self.config.num_samples, self.config.horizon,
+        )
+
+        # ---- Terrain sampling ----
+        robot_x = x0[0]
+        robot_y = x0[1]
+        robot_theta = x0[2]
+        if np.abs(robot_theta) > np.pi:
+            if robot_theta > 0:
+                robot_theta -= np.pi
+            else:                
+                robot_theta += np.pi
+
+        robot_z = self.get_robot_elevation(robot_x, robot_y)
+
+        sensed_cx = robot_x + self.config.sensor_offset * np.cos(robot_theta)
+        sensed_cy = robot_y + self.config.sensor_offset * np.sin(robot_theta)
+
+        N_t = self.config.n_terrain_points
+        sample_terrain_kernel[1, N_t](
+            self._terrain_rng_states, self.d_terrain, self.d_terrain_xy, self.d_terrain_elev,
+            float(robot_x), float(robot_y), float(robot_theta), float(self.config.sensor_offset),
+            float(self.config.sensor_radius), int(N_t), float(self.environment.bounds[0]),
+            float(self.environment.bounds[2]), float(self.environment.dx)
         )
 
         # ---- Single-pass cost + min_dist ----
@@ -320,7 +359,10 @@ class MPPIDynObs:
             self.config.d_safe, self.config.Q_obs, robot_radius,
             self.config.num_samples, self.config.horizon,
             self.config.state_dim, self.config.control_dim,
-            self.environment.bounds,
+            self.environment.bounds, 
+            self.d_terrain_xy, self.d_terrain_elev, int(N_t),
+            float(sensed_cx), float(sensed_cy), float(self.config.sensor_radius),
+            float(self.config.Q_slope), float(self.config.Q_elev), float(robot_z)
         )
 
         # ---- D2H: costs and min_dists (triggers GPU sync) ----
@@ -403,6 +445,29 @@ class MPPIDynObs:
         if return_trajectory:
             return u_opt, trajectory, is_safe
         return u_opt, None, is_safe
+    
+    def get_robot_elevation(self, px, py):
+        xmin, _, ymin, _ = self.environment.bounds
+        cell_size = float(self.environment.dx)
+
+        gx = (px - xmin) / cell_size
+        gy = (py - ymin) / cell_size
+
+        ix = int(np.floor(gx))
+        iy = int(np.floor(gy))
+        ix = np.clip(ix, 0, self.environment.terrain.shape[1] - 2)
+        iy = np.clip(iy, 0, self.environment.terrain.shape[0] - 2)
+
+        fx = gx - ix
+        fy = gy - iy
+
+        elev = (
+            self.environment.terrain[iy, ix] * (1 - fx) * (1 - fy) +
+            self.environment.terrain[iy, ix + 1] * fx * (1 - fy) +
+            self.environment.terrain[iy + 1, ix] * (1 - fx) * fy +
+            self.environment.terrain[iy + 1, ix + 1] * fx * fy
+        )
+        return elev
 
     def get_control(self, x0: np.ndarray, x_goal: np.ndarray, require_safe: bool = True):
         u_opt, trajectory, is_safe = self.solve(

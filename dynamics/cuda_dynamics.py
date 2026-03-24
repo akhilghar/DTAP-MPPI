@@ -18,7 +18,7 @@ def dynamics_metadata(state_dim, control_dim, params_dim, description=""):
     return decorator    
 
 @cuda.jit(device=True)
-def sample_terrain_slope_cuda(px, py, terrain, terrain_info):
+def true_terrain_slope_cuda(px, py, terrain, terrain_info):
     # Unpack terrain info
     xmin, ymin, dx, dy = terrain_info
     nx = terrain.shape[0]
@@ -69,7 +69,7 @@ def differential_drive(x, u, dt, params, terrain, terrain_info, x_next):
 
     # Terrain Slope Sampling
     eps = 1e-3
-    slopes = sample_terrain_slope_cuda(px, py, terrain, terrain_info)  # Should return (slope_x, slope_y)
+    slopes = true_terrain_slope_cuda(px, py, terrain, terrain_info)  # Should return (slope_x, slope_y)
     slope_x, slope_y = slopes
 
     slope = slope_x * math.cos(theta) + slope_y * math.sin(theta)
