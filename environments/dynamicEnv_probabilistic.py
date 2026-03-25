@@ -164,6 +164,9 @@ class Obstacle:
 
         self.position += self.velocity * dt
 
+# ====================================================================================
+# ProbabilisticEnv: 2D environment with dynamic circular obstacles that can be apathetic or avoidant.
+# ====================================================================================
 class ProbabilisticEnv:
     def __init__(
         self,
@@ -175,8 +178,8 @@ class ProbabilisticEnv:
         self.obstacles: List[Obstacle] = []
 
         self.terrain = None  # Placeholder for future terrain-aware behavior
-        self.dx = 0.5 # Terrain grid resolution in x direction
-        self.dy = 0.5 # Terrain grid resolution in y direction
+        self.dx = 0.05 # Terrain grid resolution in x direction
+        self.dy = self.dx # Terrain grid resolution in y direction
 
     def add_obstacle(self, obstacle: Obstacle) -> None:
         self.obstacles.append(obstacle)
@@ -375,7 +378,11 @@ class ProbabilisticEnv:
         xmin, xmax, ymin, ymax = self.bounds
         terrain_size_x = int((xmax - xmin) / self.dx)
         terrain_size_y = int((ymax - ymin) / self.dy)
-        self.terrain = 0.1*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
+        terrain_startpos_x = int(-xmin / self.dx)
+        terrain_startpos_y = int(-ymin / self.dy)
+        self.terrain = 0.3*np.linalg.norm(np.array([self.dx, self.dy]))*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
+        if self.dx > 0.5:  # Only clear a flat area for visualization if the terrain is coarse enough to be visually distracting
+            self.terrain[max(0, terrain_startpos_x-int(2/self.dx)):terrain_startpos_x+int(2/self.dx), max(0, terrain_startpos_y-int(2/self.dy)):terrain_startpos_y+int(2/self.dy)] = 0.0  # Clear a flat area around the origin for better visualization
 
     def get_visualization_data(self) -> dict:
         return {

@@ -18,8 +18,8 @@ env.generate_terrain()
 rng = np.random.default_rng(seed=42)
 for i in range(0,6):
     env.add_obstacle(
-        Obstacle(position=[np.random.randint(1.5, 11.0), np.random.randint(1.5, 11.0)], 
-                 radius=0.3+0.4*np.random.rand(),
+        Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
+                 radius=0.3+0.2*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
                  mode=ObstacleMode.AVOIDANT)
     )
@@ -52,8 +52,8 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([7.0, 7.0, 1.5, 5.0, 5.0])
-    Qf_mod=np.diag([40.0, 40.0, 5.0, 20.0, 20.0])
+    Q_mod=np.diag([10.0, 10.0, 5.0, 10.0, 10.0])
+    Qf_mod=np.diag([40.0, 40.0, 5.0, 30.0, 30.0])
     R_mod = np.eye(control_dim) * 8.0
     umin_mod = np.array([-2.0, -2.0])
     umax_mod = np.array([2.0, 2.0])
@@ -68,7 +68,7 @@ config = MPPIConfig(
     num_samples=20000,
     horizon=50,
     dt=0.05,
-    lambda_=50.0, # increase temperature for smoother trajectory
+    lambda_=25.0, # increase temperature for smoother trajectory
 
     Q=Q_mod,
     Qf=Qf_mod,
@@ -103,6 +103,7 @@ rollout_snapshots = {}  # step -> (expected_traj, sample_trajs), sampled every 2
 x = x0.copy()
 num_steps = 500
 num_safe = 0
+goal_reached = False
 
 print("Running Dynamic MPPI Simulation...")
 sim_start_time = time.time()
@@ -142,11 +143,13 @@ for step in range(num_steps):
     # --- Goal check ---
     if (np.linalg.norm(x[:2] - x_goal[:2]) < env.robot_radius) & (vel < 0.01):
         print(f"Reached goal at step {step}")
+        goal_reached = True
         break
 
     if step % 20 == 0:
         rollout_snapshots[step] = mppi.get_rollout_snapshot(n=5)
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
+              f"orientation=({x[3]*180/np.pi:.1f}deg, {x[4]*180/np.pi:.2f}deg), "
               f"covariance={cov}, "
               f"safe={is_safe}, "
               f"time per step={end-start:.3f}s")
@@ -159,6 +162,7 @@ sim_end_time = time.time()
 print(f"Simulation complete: {len(trajectory)} steps")
 print(f"Safe Trajectory Rate: {num_safe/len(trajectory):.2f}")
 print(f"Total Simulation Time: {sim_end_time - sim_start_time:.2f} seconds")
+print(f"Goal Reached: {goal_reached}")
 cov_log = np.array(cov_log)
 
 # ============================================================================
@@ -313,14 +317,17 @@ ax2.grid(True)
 # Plot 3: Steering Angle
 ax3 = axes[2]
 ax3.set_xlabel("Time (s)")
-ax3.set_ylabel("Steering Angle (rad)")
+ax3.set_ylabel("Orientation Angle (deg)")
 if state_dim == 4:
-    ax3.plot(time_vec, controls[:, 1], label='Steering Angle')
+    ax3.plot(time_vec, np.degrees(controls[:, 1]), label='Steering Angle')
     ax3.set_title("Steering Angle")
     ax3.grid(True)
 else:
-    ax3.plot(time_vec, trajectory[:-1, 2], label='Steering Angle')
-    ax3.set_title("Steering Angle")
+    ax3.plot(time_vec, np.degrees(trajectory[:-1, 2]), label='Steering Angle')
+    ax3.plot(time_vec, np.degrees(trajectory[:-1, 3]), label='Pitch Angle')
+    ax3.plot(time_vec, np.degrees(trajectory[:-1, 4]), label='Roll Angle')
+    ax3.legend()
+    ax3.set_title("Orientation Angles")
     ax3.grid(True)
 
 plt.tight_layout()

@@ -6,6 +6,7 @@ from numba.cuda.random import create_xoroshiro128p_states
 from dataclasses import dataclass
 from typing import Callable, Optional
 from scipy.signal import savgol_filter
+import time
 
 from controllers.cuda_kernels import (
     make_rollout_kernel_coalesced,
@@ -14,7 +15,8 @@ from controllers.cuda_kernels import (
     obs_mc_rollout_kernel,
     expected_trajectory_kernel,
     expected_controls_coalesced_kernel,
-    sample_terrain_kernel
+    sample_terrain_kernel,
+    sample_slope_kernel
 )
 
 
@@ -41,8 +43,8 @@ class MPPIConfig:
     obs_cost_type: str = 'barrier'
 
     # Terrain parameters
-    Q_slope: float = 15.0  # Cost weight for terrain slope (if used in dynamics)
-    Q_elev: float = 4.0   # Cost weight for elevation (if used in dynamics)
+    Q_slope: float = 8.0  # Cost weight for terrain slope (if used in dynamics)
+    Q_elev: float = 2.0   # Cost weight for elevation (if used in dynamics)
 
     # Terrain sensing parameters
     sensor_radius: float = 1.0
@@ -110,6 +112,16 @@ class MPPIDynObs:
         self.environment = environment
         xmin, _, ymin, _ = self.environment.bounds
         self.terrain_info = np.array([xmin, ymin, self.environment.dx, self.environment.dy], dtype=np.float32)
+
+        # Scale terrain cost weights by grid resolution to prevent over-penalization of fine-grained terrain
+        if self.environment.dx == self.environment.dy:
+            self.config.Q_slope *= self.environment.dx * 0.5
+            self.config.Q_elev *= self.environment.dx
+        else:
+            self.config.Q_slope *= np.linalg.norm([self.environment.dx, self.environment.dy])
+            self.config.Q_elev *= np.linalg.norm([self.environment.dx, self.environment.dy])
+
+        print(f"Adjusted terrain cost weights: Q_slope={self.config.Q_slope}, Q_elev={self.config.Q_elev}")
 
         self.config.state_dim   = metadata['state_dim']
         self.config.control_dim = metadata['control_dim']
@@ -203,6 +215,7 @@ class MPPIDynObs:
 
         self.d_terrain_xy = cuda.device_array((self.config.n_terrain_points, 2), dtype=np.float32)
         self.d_terrain_elev = cuda.device_array(self.config.n_terrain_points, dtype=np.float32)
+        self.d_sensed_slope = cuda.device_array(3, dtype=np.float32)  # (z_est, slope_x, slope_y)
         terrain_seed = int(np.random.randint(1, 2**31))
         self._terrain_rng_states = create_xoroshiro128p_states(self.config.n_terrain_points, seed=terrain_seed)
 
@@ -222,7 +235,7 @@ class MPPIDynObs:
 
     def solve(self, x0: np.ndarray, x_goal: np.ndarray,
               return_trajectory: bool = False, require_safe: bool = False):
-
+        t0 = time.perf_counter()
         # ---- Upload per-call scalars/vectors (tiny H2D, no allocation) ----
         cuda.to_device(x0.astype(np.float32),                  to=self.d_x0)
         cuda.to_device(x_goal.astype(np.float32),              to=self.d_x_goal)
@@ -238,6 +251,8 @@ class MPPIDynObs:
             self.d_sigma, self.d_u_min, self.d_u_max,
             self.config.num_samples, self.config.horizon, self.config.control_dim,
         )
+        cuda.synchronize()
+        t1 = time.perf_counter()
 
         # ---- Obstacle MC rollouts ----
         obstacles     = self.environment.get_obstacle_data()
@@ -284,6 +299,8 @@ class MPPIDynObs:
                 np.float32(self.config.dt),
                 np.float32(self.config.obs_direction_change_prob),
             )
+            cuda.synchronize()
+            t2 = time.perf_counter()
 
             d_circle_pred  = self.d_obs_rollouts
             d_circle_radii = self.d_obs_radii
@@ -325,16 +342,13 @@ class MPPIDynObs:
             self.d_samples, self.d_trajectories, self.d_x0, self.d_params,
             self.config.dt, self.d_terrain, self.d_terrain_info, self.config.num_samples, self.config.horizon,
         )
+        cuda.synchronize()
+        t3 = time.perf_counter()
 
         # ---- Terrain sampling ----
         robot_x = x0[0]
         robot_y = x0[1]
-        robot_theta = x0[2]
-        if np.abs(robot_theta) > np.pi:
-            if robot_theta > 0:
-                robot_theta -= np.pi
-            else:                
-                robot_theta += np.pi
+        robot_theta = (x0[2] + np.pi) % (2 * np.pi) - np.pi  # Normalize to [-pi, pi]
 
         robot_z = self.get_robot_elevation(robot_x, robot_y)
 
@@ -348,6 +362,12 @@ class MPPIDynObs:
             float(self.config.sensor_radius), int(N_t), float(self.environment.bounds[0]),
             float(self.environment.bounds[2]), float(self.environment.dx)
         )
+        sample_slope_kernel[1, N_t](
+            self.d_terrain_xy, self.d_terrain_elev, int(N_t),
+            float(sensed_cx), float(sensed_cy), self.d_sensed_slope,
+        )
+        cuda.synchronize()
+        t4 = time.perf_counter()
 
         # ---- Single-pass cost + min_dist ----
         mc_cost_and_min_dist_kernel[blocks, threads](
@@ -360,10 +380,12 @@ class MPPIDynObs:
             self.config.num_samples, self.config.horizon,
             self.config.state_dim, self.config.control_dim,
             self.environment.bounds, 
-            self.d_terrain_xy, self.d_terrain_elev, int(N_t),
+            self.d_sensed_slope,
             float(sensed_cx), float(sensed_cy), float(self.config.sensor_radius),
             float(self.config.Q_slope), float(self.config.Q_elev), float(robot_z)
         )
+        cuda.synchronize()
+        t5 = time.perf_counter()
 
         # ---- D2H: costs and min_dists (triggers GPU sync) ----
         costs      = self.d_costs.copy_to_host()
@@ -436,11 +458,15 @@ class MPPIDynObs:
         expected_controls = self.d_expected_controls.copy_to_host()   # (H, C)
         # print(expected_controls)
 
-        window_size = 20
-        window_deg = 3
+        window_size = 15
+        window_deg = 2
         self.u_nominal[:, 0] = savgol_filter(expected_controls[:, 0], window_size, window_deg)
         self.u_nominal[:, 1] = savgol_filter(expected_controls[:, 1], window_size, window_deg)
-        u_opt = expected_controls[0, :].astype(np.float32)
+        u_opt = self.u_nominal[0, :].astype(np.float32)
+
+        t6 = time.perf_counter()
+        # print(f"MPPI solve timings (s): sample_gen={1000*(t1-t0):.1f}ms, "
+        #      f"obs_rollout={1000*(t2-t1):.1f}ms, rollout={1000*(t3-t2):.1f}ms, terrain_sample={1000*(t4-t3):.1f}ms, cost={1000*(t5-t4):.1f}ms, cpu={1000*(t6-t5):.1f}ms")
 
         if return_trajectory:
             return u_opt, trajectory, is_safe

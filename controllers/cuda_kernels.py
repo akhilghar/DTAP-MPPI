@@ -5,6 +5,8 @@ from numba.cuda.random import float32, xoroshiro128p_uniform_float32, xoroshiro1
 import numpy as np
 import math
 
+MAX_TERRAIN_POINTS = 100  # Must match MPPIConfig.n_terrain_points; used for shared memory allocation
+
 # Rollout kernel for MPPI, dynamically generated based on the provided dynamics function
 def make_rollout_kernel(dynamics_func, state_dim, control_dim):
     
@@ -405,6 +407,120 @@ def generate_samples_kernel(rng_states, samples, u_nominal, sigma, u_min, u_max,
                     u = u_max[d]
                 samples[t, idx, d] = u
 
+# Terrain Awareness CUDA Kernels
+@cuda.jit
+def sample_terrain_kernel(rng_states, ground_truth, terrain_xy, terrain_elev,
+                          px, py, theta, sensor_offset, sensor_radius, n_points, 
+                          grid_origin_x, grid_origin_y, cell_size):
+    idx = cuda.grid(1)
+    if idx >= n_points:
+        return
+    
+    # Compute sensed region
+    cx = px + sensor_offset * math.cos(theta)
+    cy = py + sensor_offset * math.sin(theta)
+
+    # Shirley Disk Sampling
+    r1 = xoroshiro128p_uniform_float32(rng_states, idx)
+    r2 = xoroshiro128p_uniform_float32(rng_states, idx)
+    r = math.sqrt(r1) * sensor_radius
+    phi = 2.0 * math.pi * r2
+    sx = cx + r * math.cos(phi)
+    sy = cy + r * math.sin(phi)
+
+    # Sample terrain elevation at (sx, sy)
+    gx = (sx - grid_origin_x) / cell_size
+    gy = (sy - grid_origin_y) / cell_size
+
+    ix = int(gx)
+    iy = int(gy)
+
+    # Clamp indices to be within bounds
+    nx = terrain_xy.shape[0]
+    ny = terrain_xy.shape[1]
+    ix = max(0, min(nx - 2, ix))
+    iy = max(0, min(ny - 2, iy))
+
+    # Fractional offsets for bilinear interpolation
+    fx = gx - ix
+    fy = gy - iy
+
+    elev = (
+        ground_truth[ix, iy] * (1 - fx) * (1 - fy) +
+        ground_truth[ix + 1, iy] * fx * (1 - fy) +
+        ground_truth[ix, iy + 1] * (1 - fx) * fy +
+        ground_truth[ix + 1, iy + 1] * fx * fy
+    )
+
+    # Sensor noise model: Gaussian noise with std proportional to elevation
+    depth = math.sqrt((sx - px) ** 2 + (sy - py) ** 2)
+    noise_std = 0.1 * depth * depth  # 10% of depth as std
+    noise = xoroshiro128p_normal_float32(rng_states, idx) * noise_std
+
+    # Write to output arrays
+    terrain_xy[idx, 0] = sx
+    terrain_xy[idx, 1] = sy
+    terrain_elev[idx] = elev + noise
+
+@cuda.jit()
+def sample_slope_kernel(terrain_xy, terrain_elev, n_points, cx, cy, out):
+    tid = cuda.threadIdx.x
+    sh_z = cuda.shared.array(MAX_TERRAIN_POINTS, dtype=numba_float32)
+    sh_sx = cuda.shared.array(MAX_TERRAIN_POINTS, dtype=numba_float32)
+    sh_sy = cuda.shared.array(MAX_TERRAIN_POINTS, dtype=numba_float32)
+    sh_w = cuda.shared.array(MAX_TERRAIN_POINTS, dtype=numba_float32)
+
+    if tid < n_points:
+        dx = terrain_xy[tid, 0] - cx
+        dy = terrain_xy[tid, 1] - cy
+        d2 = dx * dx + dy * dy + 1e-12
+        w = 1.0 / d2
+        sh_z[tid] = terrain_elev[tid]*w
+        sh_w[tid] = w
+    else:
+        sh_z[tid] = 0.0
+        sh_w[tid] = 0.0
+    cuda.syncthreads()
+
+    # Parallel reduction to compute weighted average elevation
+    stride = cuda.blockDim.x >> 1
+    while stride > 0:
+        if tid < stride:
+            sh_z[tid] += sh_z[tid + stride]
+            sh_w[tid] += sh_w[tid + stride]
+        cuda.syncthreads()
+        stride >>= 1
+
+    z_est = sh_z[0] / sh_w[0] if sh_w[0] > 0 else 0.0
+    W = sh_w[0]
+
+    # Compute gradient of the weighted elevation field at (cx, cy) using finite differences
+    cuda.syncthreads()
+    if tid < n_points:
+        dx = terrain_xy[tid, 0] - cx
+        dy = terrain_xy[tid, 1] - cy
+        d2 = dx * dx + dy * dy + 1e-12
+        w4 = 1.0 / (d2*d2)
+        dz = terrain_elev[tid] - z_est
+        sh_sx[tid] = dz * w4 * dx
+        sh_sy[tid] = dz * w4 * dy
+    else:
+        sh_sx[tid] = 0.0
+        sh_sy[tid] = 0.0
+    cuda.syncthreads()
+
+    stride = cuda.blockDim.x >> 1
+    while stride > 0:
+        if tid < stride:
+            sh_sx[tid] += sh_sx[tid + stride]
+            sh_sy[tid] += sh_sy[tid + stride]
+        cuda.syncthreads()
+        stride >>= 1
+
+    if tid == 0:
+        out[0] = z_est
+        out[1] = 2.0 * sh_sx[0] / W  # Slope in x direction
+        out[2] = 2.0 * sh_sy[0] / W  # Slope in y direction
 
 @cuda.jit
 def mc_cost_and_min_dist_kernel(
@@ -415,7 +531,7 @@ def mc_cost_and_min_dist_kernel(
         poly_vertices, poly_starts, poly_lengths, num_polys,
         d_safe, Q_obs, robot_radius,
         num_samples, horizon, state_dim, control_dim, bounds,
-        terrain_xy, terrain_elev, n_terrain_points,
+        sensed_slope,
         sensed_cx, sensed_cy, sensed_radius,
         Q_slope, Q_elev, pz):
     """
@@ -448,6 +564,7 @@ def mc_cost_and_min_dist_kernel(
 
             px = trajectories[idx, t, 0]
             py = trajectories[idx, t, 1]
+            theta = trajectories[idx, t, 2]
 
             # MC circle cost (average over rollouts) + worst-case min_dist
             obs_cost = 0.0
@@ -509,21 +626,17 @@ def mc_cost_and_min_dist_kernel(
             d2y = py - sensed_cy
             if d2x * d2x + d2y * d2y < sensed_radius * sensed_radius:
                 # Sample slope and elevation from sensed terrain
-                z_est, slope_x, slope_y = sample_terrain_slope(px, py, terrain_xy, terrain_elev, n_terrain_points)
-
-                if t < horizon - 1:
-                    dx = trajectories[idx, t + 1, 0] - trajectories[idx, t, 0]
-                    dy = trajectories[idx, t + 1, 1] - trajectories[idx, t, 1]
-                else:
-                    dx = trajectories[idx, t, 0] - trajectories[idx, t - 1, 0]
-                    dy = trajectories[idx, t, 1] - trajectories[idx, t - 1, 1]
-
-                dist = math.sqrt(dx * dx + dy * dy) + 1e-6  # Avoid division by zero
-                slope_x = slope_x * (dx / dist)
-                slope_y = slope_y * (dy / dist)
-                slope_cost = Q_slope * (slope_x + slope_y)
-                elev_cost  = Q_elev * (z_est - pz) * (z_est - pz)
+                z_est, slope_x, slope_y = sensed_slope
+                slope_cost = Q_slope * (slope_x*slope_x + slope_y*slope_y) / horizon
+                elev_cost  = Q_elev * math.fabs(z_est - pz) / horizon
                 cost += slope_cost + elev_cost
+
+                rx = -math.sin(theta)
+                ry = math.cos(theta)
+                roll_slope = slope_x * rx + slope_y * ry
+                ROLL_SLOPE_MAX = 0.3 # Approximately sin(17 degrees), chosen based on typical robot capabilities and safety margins
+                if roll_slope > ROLL_SLOPE_MAX:  # Threshold for excessive slope
+                    cost += 0.9 * Q_obs * (roll_slope - ROLL_SLOPE_MAX)  # Penalize excessive slope in the direction of roll
 
         # Terminal cost
         terminal_cost = 0.0
@@ -575,92 +688,3 @@ def expected_controls_coalesced_kernel(samples, weights, out_controls,
     if tid == 0:
         out_controls[t, c] = shared[0]
 
-# Terrain Awareness CUDA Kernels
-@cuda.jit
-def sample_terrain_kernel(rng_states, ground_truth, terrain_xy, terrain_elev,
-                          px, py, theta, sensor_offset, sensor_radius, n_points, 
-                          grid_origin_x, grid_origin_y, cell_size):
-    idx = cuda.grid(1)
-    if idx >= n_points:
-        return
-    
-    # Compute sensed region
-    cx = px + sensor_offset * math.cos(theta)
-    cy = py + sensor_offset * math.sin(theta)
-
-    # Shirley Disk Sampling
-    r1 = xoroshiro128p_uniform_float32(rng_states, idx)
-    r2 = xoroshiro128p_uniform_float32(rng_states, idx)
-    r = math.sqrt(r1) * sensor_radius
-    phi = 2.0 * math.pi * r2
-    sx = cx + r * math.cos(phi)
-    sy = cy + r * math.sin(phi)
-
-    # Sample terrain elevation at (sx, sy)
-    gx = (sx - grid_origin_x) / cell_size
-    gy = (sy - grid_origin_y) / cell_size
-
-    ix = int(gx)
-    iy = int(gy)
-
-    # Clamp indices to be within bounds
-    nx = terrain_xy.shape[0]
-    ny = terrain_xy.shape[1]
-    ix = max(0, min(nx - 2, ix))
-    iy = max(0, min(ny - 2, iy))
-
-    # Fractional offsets for bilinear interpolation
-    fx = gx - ix
-    fy = gy - iy
-
-    elev = (
-        ground_truth[ix, iy] * (1 - fx) * (1 - fy) +
-        ground_truth[ix + 1, iy] * fx * (1 - fy) +
-        ground_truth[ix, iy + 1] * (1 - fx) * fy +
-        ground_truth[ix + 1, iy + 1] * fx * fy
-    )
-
-    # Sensor noise model: Gaussian noise with std proportional to elevation
-    depth = math.sqrt((sx - px) ** 2 + (sy - py) ** 2)
-    noise_std = 0.1 * depth * depth  # 10% of depth as std
-    noise = xoroshiro128p_normal_float32(rng_states, idx) * noise_std
-
-    # Write to output arrays
-    terrain_xy[idx, 0] = sx
-    terrain_xy[idx, 1] = sy
-    terrain_elev[idx] = elev + noise
-
-@cuda.jit(device=True)
-def sample_terrain_slope(px, py, terrain_xy, terrain_elev, n_points):
-    # find nearest point in cloud
-    best_dist = 1e9
-    best_idx  = 0
-    for i in range(n_points):
-        dx = terrain_xy[i, 0] - px
-        dy = terrain_xy[i, 1] - py
-        d2 = dx*dx + dy*dy
-        if d2 < best_dist:
-            best_dist = d2
-            best_idx  = i
-
-    # IDW elevation and slope from k nearest
-    z_est    = 0.0
-    slope_x  = 0.0
-    slope_y  = 0.0
-    total_w  = 0.0
-
-    for i in range(n_points):
-        dx = terrain_xy[i, 0] - px
-        dy = terrain_xy[i, 1] - py
-        d  = math.sqrt(dx*dx + dy*dy) + 1e-6
-        w  = 1.0 / (d * d)
-        z_est   += w * terrain_elev[i]
-        slope_x += w * dx * terrain_elev[i]
-        slope_y += w * dy * terrain_elev[i]
-        total_w += w
-
-    z_est   /= total_w
-    slope_x /= total_w
-    slope_y /= total_w
-
-    return z_est, slope_x, slope_y
