@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from scipy.signal import savgol_filter
 import time
+from environments.dynamicEnv_probabilistic import ObstacleMode
 
 from controllers.cuda_kernels import (
     make_rollout_kernel_coalesced,
@@ -47,9 +48,9 @@ class MPPIConfig:
     Q_elev: float = 2.0   # Cost weight for elevation (if used in dynamics)
 
     # Terrain sensing parameters
-    sensor_radius: float = 1.0
-    sensor_offset: float = 1.5
-    n_terrain_points: int = 100  # Number of points to sample for terrain estimation
+    sensor_radius: float = 0.8
+    sensor_offset: float = 1.0
+    n_terrain_points: int = 256  # Number of points to sample for terrain estimation
 
     # Dynamics parameters
     dynamics_params: np.ndarray = None
@@ -272,7 +273,7 @@ class MPPIDynObs:
             # Populate host-side staging buffers (no per-call numpy alloc)
             for i, obs in enumerate(self.environment.obstacles):
                 self._h_obs_pos[i]   = obs.position
-                self._h_obs_vel[i]   = obs.velocity
+                self._h_obs_vel[i]   = obs.velocity if obs.mode != ObstacleMode.STATIC else np.zeros(2, dtype=np.float32)
                 self._h_obs_spd[i]   = float(np.linalg.norm(obs.velocity))
                 self._h_obs_radii[i] = obs.radius
 
@@ -464,6 +465,11 @@ class MPPIDynObs:
         self.u_nominal[:, 1] = savgol_filter(expected_controls[:, 1], window_size, window_deg)
         u_opt = self.u_nominal[0, :].astype(np.float32)
 
+        # Warm start: time-shift nominal sequence by one step so the next
+        # solve samples around a sequence already aligned with t+1.
+        self.u_nominal[:-1, :] = self.u_nominal[1:, :]
+        self.u_nominal[-1, :]  = self.u_nominal[-2, :]  # hold last control
+
         t6 = time.perf_counter()
         # print(f"MPPI solve timings (s): sample_gen={1000*(t1-t0):.1f}ms, "
         #      f"obs_rollout={1000*(t2-t1):.1f}ms, rollout={1000*(t3-t2):.1f}ms, terrain_sample={1000*(t4-t3):.1f}ms, cost={1000*(t5-t4):.1f}ms, cpu={1000*(t6-t5):.1f}ms")
@@ -521,8 +527,18 @@ class MPPIDynObs:
         sample_trajs = np.stack([self.d_trajectories[i].copy_to_host() for i in indices])
         return self._last_expected_traj, sample_trajs
     
+    def reset_warm_start(self):
+        """Zero out the nominal control sequence (call at the start of a new episode)."""
+        self.u_nominal[:] = 0.0
+
     def get_covariance(self):
         return self.current_covariance
+
+    def get_local_terrain(self):
+        terrain_xy = self.d_terrain_xy.copy_to_host()
+        terrain_elev = self.d_terrain_elev.copy_to_host()
+        sensed_slope = self.d_sensed_slope.copy_to_host()
+        return terrain_xy, terrain_elev, sensed_slope
 
     def free_gpu_buffers(self, force_reset: bool = False):
         import gc
