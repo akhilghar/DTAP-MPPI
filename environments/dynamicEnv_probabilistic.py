@@ -6,6 +6,7 @@ from typing import List, Tuple, Optional
 class ObstacleMode(Enum):
     APATHETIC = "apathetic"   # Random wandering, ignores robot
     AVOIDANT  = "avoidant"    # Actively steers away from robot
+    STATIC  = "static"     # No movement, purely a static obstacle (can be implemented as a special case of apathetic with zero speed)
 
 
 # In this environment, we will treat all obstacles to be circles
@@ -117,6 +118,10 @@ class Obstacle:
 
         return desired.astype(np.float32)
 
+    def _desired_velocity_static(self, bounds=None) -> np.ndarray:
+        """Static obstacles do not move."""
+        return np.zeros(2, dtype=np.float32)
+
     def _neighbor_repulsion(self, neighbors: list) -> np.ndarray:
         """
         Compute a repulsion velocity contribution from nearby obstacles.
@@ -124,16 +129,19 @@ class Obstacle:
         Repulsion is keyed on the surface gap (center distance - combined radii) so
         it is automatically proportional to obstacle size.
         """
-        repulsion = np.zeros(2, dtype=np.float32)
-        for (pos, radius) in neighbors:
-            diff        = self.position - pos
-            dist        = np.linalg.norm(diff)
-            surface_gap = dist - (self.radius + radius)
-            if surface_gap < self.neighbor_avoidance_radius and dist > 1e-6:
-                direction = diff / dist
-                mag       = self.neighbor_avoidance_strength / (surface_gap ** 2 + 1e-3)
-                mag       = float(np.clip(mag, 0.0, self.speed * 3.0))
-                repulsion += mag * direction
+        if self.mode != ObstacleMode.STATIC:
+            repulsion = np.zeros(2, dtype=np.float32)
+            for (pos, radius) in neighbors:
+                diff        = self.position - pos
+                dist        = np.linalg.norm(diff)
+                surface_gap = dist - (self.radius + radius)
+                if surface_gap < self.neighbor_avoidance_radius and dist > 1e-6:
+                    direction = diff / dist
+                    mag       = self.neighbor_avoidance_strength / (surface_gap ** 2 + 1e-3)
+                    mag       = float(np.clip(mag, 0.0, self.speed * 3.0))
+                    repulsion += mag * direction
+        else:
+            repulsion = np.zeros(2, dtype=np.float32)
         return repulsion
 
     # ------------------------------------------------------------------
@@ -145,6 +153,9 @@ class Obstacle:
 
         if self.mode == ObstacleMode.APATHETIC:
             v_desired = self._desired_velocity_apathetic(bounds)
+        elif self.mode == ObstacleMode.STATIC:
+            v_desired = self._desired_velocity_static(bounds)
+            return  # Static obstacles do not move, so we can skip the rest of the function
         else:  # AVOIDANT
             v_desired = self._desired_velocity_avoidant(robot_pos, bounds)
 
@@ -178,7 +189,7 @@ class ProbabilisticEnv:
         self.obstacles: List[Obstacle] = []
 
         self.terrain = None  # Placeholder for future terrain-aware behavior
-        self.dx = 0.05 # Terrain grid resolution in x direction
+        self.dx = 0.5 # Terrain grid resolution in x direction
         self.dy = self.dx # Terrain grid resolution in y direction
 
     def add_obstacle(self, obstacle: Obstacle) -> None:
@@ -237,20 +248,21 @@ class ProbabilisticEnv:
         xmin, xmax, ymin, ymax = self.bounds
 
         for i, obs in enumerate(self.obstacles):
-            neighbors = [neighbor_snapshot[j] for j in range(len(self.obstacles)) if j != i]
-            obs.move(dt, robot_pos=robot_pos, bounds=self.bounds, neighbors=neighbors)
+            if obs.mode != ObstacleMode.STATIC:  # Static obstacles do not move, so we can skip the move call for them
+                neighbors = [neighbor_snapshot[j] for j in range(len(self.obstacles)) if j != i]
+                obs.move(dt, robot_pos=robot_pos, bounds=self.bounds, neighbors=neighbors)
 
-            x, y = obs.position
-            r    = obs.radius
+                x, y = obs.position
+                r    = obs.radius
 
-            # Wall bounce — reflect velocity and clamp position
-            if x - r < xmin or x + r > xmax:
-                obs.velocity[0] *= -1
-                obs.position[0]  = np.clip(obs.position[0], xmin + r, xmax - r)
+                # Wall bounce — reflect velocity and clamp position
+                if x - r < xmin or x + r > xmax:
+                    obs.velocity[0] *= -1
+                    obs.position[0]  = np.clip(obs.position[0], xmin + r, xmax - r)
 
-            if y - r < ymin or y + r > ymax:
-                obs.velocity[1] *= -1
-                obs.position[1]  = np.clip(obs.position[1], ymin + r, ymax - r)
+                if y - r < ymin or y + r > ymax:
+                    obs.velocity[1] *= -1
+                    obs.position[1]  = np.clip(obs.position[1], ymin + r, ymax - r)
 
     def check_for_collision(self, position: np.ndarray) -> bool:
         if not self._in_bounds(position):
@@ -374,15 +386,26 @@ class ProbabilisticEnv:
 
         return all_trajs
 
-    def generate_terrain(self) -> None:
+    def generate_terrain(self, flat: bool) -> None:
         xmin, xmax, ymin, ymax = self.bounds
         terrain_size_x = int((xmax - xmin) / self.dx)
         terrain_size_y = int((ymax - ymin) / self.dy)
+
+        if flat:
+            self.terrain = np.zeros((terrain_size_x, terrain_size_y), dtype=np.float32)  # Flat terrain has zero cost everywhere
+            return
+
         terrain_startpos_x = int(-xmin / self.dx)
         terrain_startpos_y = int(-ymin / self.dy)
+        terrain_goalpos_x = int((10.0-xmin) / self.dx) # Change this if the goal is not at (10,10)
+        terrain_goalpos_y = int((10.0-ymin) / self.dy) # Change this if the goal is not at (10,10)
+
         self.terrain = 0.3*np.linalg.norm(np.array([self.dx, self.dy]))*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
         if self.dx > 0.5:  # Only clear a flat area for visualization if the terrain is coarse enough to be visually distracting
             self.terrain[max(0, terrain_startpos_x-int(2/self.dx)):terrain_startpos_x+int(2/self.dx), max(0, terrain_startpos_y-int(2/self.dy)):terrain_startpos_y+int(2/self.dy)] = 0.0  # Clear a flat area around the origin for better visualization
+
+        # Prevent goal from being on a steep slope by clearing a flat area around the goal as well
+        # self.terrain[max(0, terrain_goalpos_x-int(1/self.dx)):min(terrain_goalpos_x+int(1/self.dx), terrain_size_x), max(0, terrain_goalpos_y-int(1/self.dy)):min(terrain_goalpos_y+int(1/self.dy), terrain_size_y)] = 0.0
 
     def get_visualization_data(self) -> dict:
         return {

@@ -12,17 +12,25 @@ from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, Ob
 # ============================================================================
 # corridor_width = 4.0
 env = ProbabilisticEnv(bounds=(-2, 12, -2, 12), robot_radius=0.3)
-env.generate_terrain()
+env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,6):
+for i in range(0,5):
     env.add_obstacle(
         Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
                  radius=0.3+0.2*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
                  mode=ObstacleMode.AVOIDANT)
     )
+
+# Add static circular obstacles
+env.add_obstacle(
+    Obstacle(position=[5.0, 5.0], 
+             radius=2.0,
+             velocity=[0.0, 0.0],
+             mode=ObstacleMode.STATIC)
+)
 
 # ============================================================================
 # Configure MPPI
@@ -52,32 +60,32 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([10.0, 10.0, 5.0, 10.0, 10.0])
-    Qf_mod=np.diag([40.0, 40.0, 5.0, 30.0, 30.0])
-    R_mod = np.eye(control_dim) * 8.0
-    umin_mod = np.array([-2.0, -2.0])
-    umax_mod = np.array([2.0, 2.0])
-    noise_mod = np.array([0.5, 0.5])
+    Q_mod=np.diag([10.0, 10.0, 7.0, 10.0, 20.0])
+    Qf_mod=np.diag([40.0, 40.0, 2.0, 5.0, 5.0])
+    R_mod = np.eye(control_dim)
+    umin_mod = np.array([-3.0, -3.0])
+    umax_mod = np.array([3.0, 3.0])
+    noise_mod = np.array([0.75, 0.75])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([0.0, 0.0, np.pi/4, 0.0, 0.0])
-    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])
+    x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, np.pi/4, 0.0, 0.0])
 
 
 config = MPPIConfig(
     num_samples=20000,
-    horizon=50,
+    horizon=40,
     dt=0.05,
-    lambda_=25.0, # increase temperature for smoother trajectory
+    lambda_=30.0, # increase temperature for smoother trajectory
 
     Q=Q_mod,
     Qf=Qf_mod,
     R=R_mod,
 
     Q_obs=250.0,
-    d_safe=env.robot_radius + 0.1,
+    d_safe=env.robot_radius + 0.15,
 
-    dynamics_params=np.array([0.6, 0.1]),
+    dynamics_params=np.array([2*env.robot_radius, 0.1]),
 
     u_min=umin_mod,
     u_max=umax_mod,
@@ -99,6 +107,7 @@ cov_log = []
 
 obstacle_history = []
 rollout_snapshots = {}  # step -> (expected_traj, sample_trajs), sampled every 20 steps
+terrain_snapshots = {}  # step -> (terrain_xy, terrain_elev, sensed_slope, sensed_center), sampled every step
 
 x = x0.copy()
 num_steps = 500
@@ -117,7 +126,8 @@ for step in range(num_steps):
 
     # --- Get MPPI control ---
     start = time.time()
-    u, is_safe = mppi.get_control(x, x_goal, require_safe=True)
+    x_query = x.copy()
+    u, is_safe = mppi.get_control(x_query, x_goal, require_safe=True)
     if is_safe:
         num_safe += 1
 
@@ -146,9 +156,17 @@ for step in range(num_steps):
         goal_reached = True
         break
 
+    terrain_xy, terrain_elev, sensed_slope = mppi.get_local_terrain()
+    sensed_center = np.array([
+        x_query[0] + config.sensor_offset * np.cos(x_query[2]),
+        x_query[1] + config.sensor_offset * np.sin(x_query[2]),
+    ], dtype=np.float32)
+    terrain_snapshots[step] = (terrain_xy, terrain_elev, sensed_slope, sensed_center)
+
     if step % 20 == 0:
         rollout_snapshots[step] = mppi.get_rollout_snapshot(n=5)
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
+              f"position_error={np.linalg.norm(x[:2]-x_goal[:2]):.2f}, "
               f"orientation=({x[3]*180/np.pi:.1f}deg, {x[4]*180/np.pi:.2f}deg), "
               f"covariance={cov}, "
               f"safe={is_safe}, "
@@ -173,12 +191,15 @@ import matplotlib.animation as animation
 from matplotlib import colors
 from matplotlib.patches import Circle, Rectangle
 
-fig, ax = plt.subplots(figsize=(8, 8))
+fig, ax = plt.subplots(figsize=(9, 8))
 ax.set_aspect('equal')
 
 xmin, xmax, ymin, ymax = env.bounds
 ax.set_xlim(xmin, xmax)
 ax.set_ylim(ymin, ymax)
+ax.set_title('Robot Traversal + Sensed Terrain Overlay (per-frame updates)')
+ax.set_xlabel('x')
+ax.set_ylabel('y')
 
 if env.terrain is not None:
     terrain_min = float(np.min(env.terrain))
@@ -200,6 +221,43 @@ if env.terrain is not None:
     )
     colorbar = fig.colorbar(terrain_map, ax=ax, pad=0.02, shrink=0.85)
     colorbar.set_label('Terrain elevation')
+    sensed_terrain_norm = terrain_norm
+else:
+    sensed_terrain_norm = colors.Normalize(vmin=0.0, vmax=1.0)
+
+terrain_scatter = ax.scatter(
+    [], [],
+    c=[],
+    cmap='terrain',
+    norm=sensed_terrain_norm,
+    s=12,
+    alpha=0.75,
+    zorder=5,
+)
+
+sensed_region_patch = Circle(
+    (0.0, 0.0),
+    config.sensor_radius,
+    fill=False,
+    linestyle='--',
+    linewidth=2.0,
+    edgecolor='cyan',
+    zorder=6,
+)
+ax.add_patch(sensed_region_patch)
+
+sensed_center_marker, = ax.plot([], [], marker='x', color='cyan', markersize=8, zorder=7)
+slope_line, = ax.plot([], [], color='magenta', linewidth=2, zorder=7)
+slope_text = ax.text(
+    0.68,
+    0.98,
+    '',
+    transform=ax.transAxes,
+    va='top',
+    ha='left',
+    fontsize=9,
+    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'),
+)
 
 # Draw boundary
 ax.add_patch(Rectangle((xmin, ymin),
@@ -273,7 +331,36 @@ def update(frame):
         for j, line in enumerate(sample_rollout_lines):
             line.set_data(sample_trajs[j, :, 0], sample_trajs[j, :, 1])
 
-    return ([robot_patch, traj_line, heading_line, selected_rollout_line]
+    # Update sensed-terrain overlay every frame.
+    if frame in terrain_snapshots:
+        terrain_xy, terrain_elev, sensed_slope, sensed_center = terrain_snapshots[frame]
+
+        terrain_scatter.set_offsets(terrain_xy)
+        terrain_scatter.set_array(terrain_elev)
+
+        sensed_region_patch.center = (float(sensed_center[0]), float(sensed_center[1]))
+        sensed_center_marker.set_data([float(sensed_center[0])], [float(sensed_center[1])])
+
+        slope_vec = sensed_slope[1:3]
+        slope_mag = float(np.linalg.norm(slope_vec))
+        if slope_mag > 1e-6:
+            slope_dir = slope_vec / slope_mag
+        else:
+            slope_dir = np.array([0.0, 0.0], dtype=np.float32)
+
+        slope_scale = 0.8 * config.sensor_radius
+        sx, sy = float(sensed_center[0]), float(sensed_center[1])
+        ex = sx + slope_scale * float(slope_dir[0])
+        ey = sy + slope_scale * float(slope_dir[1])
+        slope_line.set_data([sx, ex], [sy, ey])
+        slope_text.set_text(
+            f"z_est={float(sensed_slope[0]):.3f}\n"
+            f"|slope|={slope_mag:.3f}\n"
+            f"step={frame}"
+        )
+
+    return ([robot_patch, traj_line, heading_line, selected_rollout_line,
+             terrain_scatter, sensed_region_patch, sensed_center_marker, slope_line, slope_text]
             + sample_rollout_lines + obstacle_patches)
 
 ani = animation.FuncAnimation(

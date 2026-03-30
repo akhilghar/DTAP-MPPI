@@ -5,7 +5,7 @@ from numba.cuda.random import float32, xoroshiro128p_uniform_float32, xoroshiro1
 import numpy as np
 import math
 
-MAX_TERRAIN_POINTS = 100  # Must match MPPIConfig.n_terrain_points; used for shared memory allocation
+MAX_TERRAIN_POINTS = 256  # Must match MPPIConfig.n_terrain_points; used for shared memory allocation
 
 # Rollout kernel for MPPI, dynamically generated based on the provided dynamics function
 def make_rollout_kernel(dynamics_func, state_dim, control_dim):
@@ -420,11 +420,23 @@ def sample_terrain_kernel(rng_states, ground_truth, terrain_xy, terrain_elev,
     cx = px + sensor_offset * math.cos(theta)
     cy = py + sensor_offset * math.sin(theta)
 
-    # Shirley Disk Sampling
+    # Shirley Disk Sampling with Stratification
+    n_radial = 5
+    n_sector = MAX_TERRAIN_POINTS // n_radial
+
+    ring_idx = idx // n_sector
+    sector_idx = idx % n_sector
     r1 = xoroshiro128p_uniform_float32(rng_states, idx)
     r2 = xoroshiro128p_uniform_float32(rng_states, idx)
-    r = math.sqrt(r1) * sensor_radius
-    phi = 2.0 * math.pi * r2
+    
+    r_inner = math.sqrt(ring_idx / n_radial)
+    r_outer = math.sqrt((ring_idx + 1) / n_radial)
+    r = (r_inner + (r_outer - r_inner) * r1)*sensor_radius
+
+    phi_inner = 2.0 * math.pi * float(sector_idx) / float(n_sector)
+    phi_outer = 2.0 * math.pi * float((sector_idx + 1)) / float(n_sector)
+    phi = phi_inner + (phi_outer - phi_inner) * r2
+
     sx = cx + r * math.cos(phi)
     sy = cy + r * math.sin(phi)
 
