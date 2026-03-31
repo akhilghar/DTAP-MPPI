@@ -1,5 +1,10 @@
 import numpy as np
 from typing import Tuple, Callable
+from numba import cuda
+
+from estimator_kernels import (
+    ray_to_terrain_kernel
+)
 
 class Camera:
     def __init__(self, focal_length: float, sensor_size: Tuple[float, float], image_size: Tuple[int, int],
@@ -15,6 +20,24 @@ class Camera:
         self.pixel_size = (sensor_size[0] / image_size[0], sensor_size[1] / image_size[1])
         self.horizontal_fov = 2 * np.arctan((sensor_size[0] / 2) / focal_length)
         self.vertical_fov = 2 * np.arctan((sensor_size[1] / 2) / focal_length)
+
+        self.pixel_step = 4
+        self.n_rays = (image_size[0] // self.pixel_step) * (image_size[1] // self.pixel_step)
+
+        self.d_rays_dx = cuda.device_array(self.n_rays, dtype=np.float32)
+        self.d_rays_dy = cuda.device_array(self.n_rays, dtype=np.float32)
+        self.d_rays_dz = cuda.device_array(self.n_rays, dtype=np.float32)
+        self.d_out_x = cuda.device_array(self.n_rays, dtype=np.float32)
+        self.d_out_y = cuda.device_array(self.n_rays, dtype=np.float32)
+        self.d_out_z = cuda.device_array(self.n_rays, dtype=np.float32)
+        self.d_out_depth = cuda.device_array(self.n_rays, dtype=np.float32)
+        self.d_out_valid = cuda.device_array(self.n_rays, dtype=np.bool_)
+
+        self.h_out_x = np.empty(self.n_rays, dtype=np.float32)
+        self.h_out_y = np.empty(self.n_rays, dtype=np.float32)
+        self.h_out_z = np.empty(self.n_rays, dtype=np.float32)
+        self.h_out_depth = np.empty(self.n_rays, dtype=np.float32)
+        self.h_out_valid = np.empty(self.n_rays, dtype=np.bool_)
 
     def compute_sensor_frustum(self, robot_position: np.ndarray, robot_heading: float) -> dict:
         blind_zone = self.mounting_height * np.tan(np.radians(self.mounting_angle) + np.radians(self.vertical_fov / 2))
@@ -70,58 +93,6 @@ class Camera:
 
         return dirs_robot_normalized
     
-    def rays_to_ground(self, rays: np.ndarray, robot_position: np.ndarray, robot_heading: float,
-                       terrain_query_fn: Callable, step_size: float = 0.2) -> Tuple[np.ndarray, np.ndarray]:
-        theta = np.radians(robot_heading)
-        
-        world_dx = rays[:, 0] * np.cos(theta) - rays[:, 2] * np.sin(theta)
-        world_dy = rays[:, 0] * np.sin(theta) + rays[:, 2] * np.cos(theta)
-        world_dz = rays[:, 1]
-
-        n_rays = len(rays)
-        max_steps = int(self.max_range / step_size)
-
-        active = np.ones(n_rays, dtype=bool)
-        hit_points = np.full((n_rays, 3), np.nan)
-        hit_depths = np.full(n_rays, np.nan)
-
-        for i in range(1, max_steps + 1):
-            t = i * step_size
-
-            sample_x = robot_position[0] + world_dx[active] * t
-            sample_y = robot_position[1] + world_dy[active] * t
-            ray_z = self.mounting_height + world_dz[active] * t
-
-            sample_xy = np.stack((sample_x, sample_y), axis=-1)
-            terrain_heights = terrain_query_fn(sample_xy)
-
-            hits = ray_z <= terrain_heights
-            
-            if np.any(hits):
-                active_indices = np.where(active)[0]
-                hit_indices = active_indices[hits]
-
-                hit_points[hit_indices, 0] = sample_x[hits]
-                hit_points[hit_indices, 1] = sample_y[hits]
-                hit_points[hit_indices, 2] = terrain_heights[hits]
-                hit_depths[hit_indices] = t
-
-                active[hit_indices] = False
-
-            if not np.any(active):
-                break
-
-        valid_mask = ~np.isnan(hit_depths)
-        return hit_points[valid_mask], hit_depths[valid_mask]
-    
-    def sample_terrain(self, ground_points: np.ndarray, terrain_query_fn: Callable) -> np.ndarray:
-        if len(ground_points) == 0:
-            return np.array([])
-
-        sample_xy = ground_points[:, :2]
-        terrain_heights = terrain_query_fn(sample_xy)
-        return terrain_heights
-    
     def add_noise(self, points_3d: np.ndarray, depths: np.ndarray, sigma: float) -> np.ndarray:
         noisy_points = points_3d.copy()
         sigma_lateral = sigma*depths*self.pixel_size[0] / self.focal_length
@@ -153,13 +124,47 @@ class Camera:
             'patch_size': patch_size
         }
     
-    def get_point_cloud(self, robot_position: np.ndarray, robot_heading: float, terrain_query_fn: Callable,
+    def get_point_cloud(self, robot_position: np.ndarray, robot_heading: float, 
+                        d_heightmap: cuda.device_array.DeviceNDArray,
+                        heightmap_origin: np.ndarray, heightmap_cell_size: float,
                         noise_sigma: float = 0.5) -> dict:
         
         pixels = self.generate_pixel_grid()
         rays = self.pixel_to_rays(pixels)
-        ground_points, depths = self.rays_to_ground(rays, robot_position, robot_heading, terrain_query_fn)
-        noisy_points = self.add_noise(ground_points, depths, noise_sigma)
+        
+        theta = np.radians(robot_heading)
+        world_dx = (rays[:, 0] * np.cos(theta) - rays[:, 2] * np.sin(theta)).astype(np.float32)
+        world_dy = (rays[:, 0] * np.sin(theta) + rays[:, 2] * np.cos(theta)).astype(np.float32)
+        world_dz = rays[:, 1].astype(np.float32)
+
+        self.d_rays_dx.copy_to_device(world_dx)
+        self.d_rays_dy.copy_to_device(world_dy)
+        self.d_rays_dz.copy_to_device(world_dz)
+
+        cam_x = np.float32(robot_position[0])
+        cam_y = np.float32(robot_position[1])
+        cam_z = np.float32(self.mounting_height)
+
+        threads_per_block = 256
+        blocks_per_grid = (self.n_rays + threads_per_block - 1) // threads_per_block
+
+        ray_to_terrain_kernel[blocks_per_grid, threads_per_block](
+            self.d_rays_dx, self.d_rays_dy, self.d_rays_dz, cam_x, cam_y, cam_z, d_heightmap,
+            heightmap_origin[0], heightmap_origin[1], heightmap_cell_size, self.max_range, 0.1,
+            self.d_out_x, self.d_out_y, self.d_out_z, self.d_out_depth, self.d_out_valid
+        )
+
+        self.d_out_x.copy_to_host(self.h_out_x)
+        self.d_out_y.copy_to_host(self.h_out_y)
+        self.d_out_z.copy_to_host(self.h_out_z)
+        self.d_out_depth.copy_to_host(self.h_out_depth)
+        self.d_out_valid.copy_to_host(self.h_out_valid)
+
+        valid_points = self.h_out_valid
+        points_3d = np.stack((self.h_out_x[valid_points], self.h_out_y[valid_points], self.h_out_z[valid_points]), axis=-1)
+        depths = self.h_out_depth[valid_points]
+
+        noisy_points = self.add_noise(points_3d, depths, noise_sigma)
         uncertainty = self.compute_point_uncertainty(depths, noise_sigma)
 
         return {
