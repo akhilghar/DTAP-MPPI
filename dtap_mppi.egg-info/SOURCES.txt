@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 controllers/__init__.py
 controllers/cuda_kernels.py
+controllers/dstar_planner.py
 controllers/mpc_baseline.py
 controllers/mppi_baseline.py
 controllers/mppi_dynObs.py
@@ -18,3 +19,8 @@ environments/_init__.py
 environments/dynamicEnv_deterministic.py
 environments/dynamicEnv_probabilistic.py
 environments/staticEnv.py
+terrain_estimators/DEM_builder.py
+terrain_estimators/camera.py
+terrain_estimators/estimator_kernels.py
+terrain_estimators/trav_mapBuilder.py
+terrain_estimators/traversability_BCM.py

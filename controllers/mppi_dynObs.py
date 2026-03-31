@@ -15,10 +15,11 @@ from controllers.cuda_kernels import (
     mc_cost_and_min_dist_kernel,
     obs_mc_rollout_kernel,
     expected_trajectory_kernel,
-    expected_controls_coalesced_kernel,
-    sample_terrain_kernel,
-    sample_slope_kernel
+    expected_controls_coalesced_kernel
 )
+
+from terrain_estimators.camera import Camera
+from terrain_estimators.DEM_builder import DEMBuilder
 
 
 @dataclass
@@ -44,13 +45,7 @@ class MPPIConfig:
     obs_cost_type: str = 'barrier'
 
     # Terrain parameters
-    Q_slope: float = 8.0  # Cost weight for terrain slope (if used in dynamics)
-    Q_elev: float = 2.0   # Cost weight for elevation (if used in dynamics)
-
-    # Terrain sensing parameters
-    sensor_radius: float = 0.8
-    sensor_offset: float = 1.0
-    n_terrain_points: int = 256  # Number of points to sample for terrain estimation
+    Q_trav: float = 10.0  # Traversability cost weight
 
     # Dynamics parameters
     dynamics_params: np.ndarray = None
@@ -89,7 +84,7 @@ class MPPIConfig:
 
 
 class MPPIDynObs:
-    def __init__(self, config: MPPIConfig, dynamics_func: Callable, environment):
+    def __init__(self, config: MPPIConfig, dynamics_func: Callable, environment, camera: Camera, dem_builder: DEMBuilder):
 
         if not hasattr(dynamics_func, 'metadata'):
             raise ValueError("Dynamics function must have metadata for state_dim, control_dim, and params_dim.")
@@ -114,16 +109,6 @@ class MPPIDynObs:
         xmin, _, ymin, _ = self.environment.bounds
         self.terrain_info = np.array([xmin, ymin, self.environment.dx, self.environment.dy], dtype=np.float32)
 
-        # Scale terrain cost weights by grid resolution to prevent over-penalization of fine-grained terrain
-        if self.environment.dx == self.environment.dy:
-            self.config.Q_slope *= self.environment.dx * 0.5
-            self.config.Q_elev *= self.environment.dx
-        else:
-            self.config.Q_slope *= np.linalg.norm([self.environment.dx, self.environment.dy])
-            self.config.Q_elev *= np.linalg.norm([self.environment.dx, self.environment.dy])
-
-        print(f"Adjusted terrain cost weights: Q_slope={self.config.Q_slope}, Q_elev={self.config.Q_elev}")
-
         self.config.state_dim   = metadata['state_dim']
         self.config.control_dim = metadata['control_dim']
 
@@ -146,6 +131,9 @@ class MPPIDynObs:
         # RNG states for obs_mc_rollout_kernel — lazily grown as obstacle count changes
         self._obs_rng_states   = None
         self._obs_rng_n_states = 0
+
+        self.camera = camera
+        self.dem_builder = dem_builder
 
         self._allocate_gpu_memory()
 
@@ -213,12 +201,10 @@ class MPPIDynObs:
         # ---- Terrain buffers ----
         self.d_terrain = cuda.to_device(self.environment.terrain.astype(np.float32))
         self.d_terrain_info = cuda.to_device(self.terrain_info)
-
-        self.d_terrain_xy = cuda.device_array((self.config.n_terrain_points, 2), dtype=np.float32)
-        self.d_terrain_elev = cuda.device_array(self.config.n_terrain_points, dtype=np.float32)
-        self.d_sensed_slope = cuda.device_array(3, dtype=np.float32)  # (z_est, slope_x, slope_y)
-        terrain_seed = int(np.random.randint(1, 2**31))
-        self._terrain_rng_states = create_xoroshiro128p_states(self.config.n_terrain_points, seed=terrain_seed)
+        dem_rows, dem_cols = self.dem_builder.grid_size
+        self.d_trav_cost = cuda.device_array((dem_rows, dem_cols), dtype=np.float32)
+        cuda.to_device(np.full((dem_rows, dem_cols), 100.0, dtype=np.float32), to=self.d_trav_cost)
+        self.d_trav_info = cuda.to_device(np.array([self.dem_builder.origin[0], self.dem_builder.origin[1], self.dem_builder.cell_size], dtype=np.float32))
 
         self._last_expected_traj = None
 
@@ -226,7 +212,9 @@ class MPPIDynObs:
             self.d_samples.nbytes + self.d_trajectories.nbytes +
             self.d_costs.nbytes   + self.d_min_dists.nbytes    +
             self.d_weights.nbytes + self.d_obs_rollouts.nbytes +
-            self.d_terrain.nbytes + self.d_terrain_info.nbytes
+            self.d_terrain.nbytes + self.d_terrain_info.nbytes +
+            self.d_trav_cost.nbytes + self.d_trav_info.nbytes
+
         )
         print(f"Allocated GPU memory: {total_bytes / 1e6:.2f} MB")
 
@@ -346,27 +334,19 @@ class MPPIDynObs:
         cuda.synchronize()
         t3 = time.perf_counter()
 
-        # ---- Terrain sampling ----
-        robot_x = x0[0]
-        robot_y = x0[1]
-        robot_theta = (x0[2] + np.pi) % (2 * np.pi) - np.pi  # Normalize to [-pi, pi]
-
-        robot_z = self.get_robot_elevation(robot_x, robot_y)
-
-        sensed_cx = robot_x + self.config.sensor_offset * np.cos(robot_theta)
-        sensed_cy = robot_y + self.config.sensor_offset * np.sin(robot_theta)
-
-        N_t = self.config.n_terrain_points
-        sample_terrain_kernel[1, N_t](
-            self._terrain_rng_states, self.d_terrain, self.d_terrain_xy, self.d_terrain_elev,
-            float(robot_x), float(robot_y), float(robot_theta), float(self.config.sensor_offset),
-            float(self.config.sensor_radius), int(N_t), float(self.environment.bounds[0]),
-            float(self.environment.bounds[2]), float(self.environment.dx)
+        # ---- Camera terrain sensing and processing (slope/elevation estimation) ----
+        point_cloud = self.camera.get_point_cloud(
+            robot_position=x0[:2],
+            robot_heading=np.degrees(x0[3]),
+            d_heightmap=self.d_terrain,
+            heightmap_origin=np.array([self.environment.bounds[0], self.environment.bounds[2]], dtype=np.float32),
+            heightmap_cell_size=self.environment.dx,
+            noise_sigma=0.5
         )
-        sample_slope_kernel[1, N_t](
-            self.d_terrain_xy, self.d_terrain_elev, int(N_t),
-            float(sensed_cx), float(sensed_cy), self.d_sensed_slope,
-        )
+        self.dem_builder.fuse_point_cloud(point_cloud)
+        trav_cost = self.dem_builder.get_traversability_cost().astype(np.float32)
+        cuda.to_device(trav_cost, to=self.d_trav_cost)
+
         cuda.synchronize()
         t4 = time.perf_counter()
 
@@ -380,10 +360,9 @@ class MPPIDynObs:
             self.config.d_safe, self.config.Q_obs, robot_radius,
             self.config.num_samples, self.config.horizon,
             self.config.state_dim, self.config.control_dim,
-            self.environment.bounds, 
-            self.d_sensed_slope,
-            float(sensed_cx), float(sensed_cy), float(self.config.sensor_radius),
-            float(self.config.Q_slope), float(self.config.Q_elev), float(robot_z)
+            self.environment.bounds,
+            float(self.config.Q_trav),
+            self.d_trav_cost, self.d_trav_info
         )
         cuda.synchronize()
         t5 = time.perf_counter()
@@ -470,9 +449,10 @@ class MPPIDynObs:
         self.u_nominal[:-1, :] = self.u_nominal[1:, :]
         self.u_nominal[-1, :]  = self.u_nominal[-2, :]  # hold last control
 
+        cuda.synchronize()
         t6 = time.perf_counter()
-        # print(f"MPPI solve timings (s): sample_gen={1000*(t1-t0):.1f}ms, "
-        #      f"obs_rollout={1000*(t2-t1):.1f}ms, rollout={1000*(t3-t2):.1f}ms, terrain_sample={1000*(t4-t3):.1f}ms, cost={1000*(t5-t4):.1f}ms, cpu={1000*(t6-t5):.1f}ms")
+        print(f"MPPI solve timings (s): sample_gen={1000*(t1-t0):.1f}ms, "
+              f"obs_rollout={1000*(t2-t1):.1f}ms, rollout={1000*(t3-t2):.1f}ms, terrain_sample={1000*(t4-t3):.1f}ms, cost={1000*(t5-t4):.1f}ms, cpu={1000*(t6-t5):.1f}ms")
 
         if return_trajectory:
             return u_opt, trajectory, is_safe
@@ -533,12 +513,6 @@ class MPPIDynObs:
 
     def get_covariance(self):
         return self.current_covariance
-
-    def get_local_terrain(self):
-        terrain_xy = self.d_terrain_xy.copy_to_host()
-        terrain_elev = self.d_terrain_elev.copy_to_host()
-        sensed_slope = self.d_sensed_slope.copy_to_host()
-        return terrain_xy, terrain_elev, sensed_slope
 
     def free_gpu_buffers(self, force_reset: bool = False):
         import gc

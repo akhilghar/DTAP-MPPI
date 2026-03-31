@@ -5,8 +5,6 @@ from numba.cuda.random import float32, xoroshiro128p_uniform_float32, xoroshiro1
 import numpy as np
 import math
 
-MAX_TERRAIN_POINTS = 256  # Must match MPPIConfig.n_terrain_points; used for shared memory allocation
-
 # Rollout kernel for MPPI, dynamically generated based on the provided dynamics function
 def make_rollout_kernel(dynamics_func, state_dim, control_dim):
     
@@ -407,7 +405,7 @@ def generate_samples_kernel(rng_states, samples, u_nominal, sigma, u_min, u_max,
                     u = u_max[d]
                 samples[t, idx, d] = u
 
-# Terrain Awareness CUDA Kernels
+"""# Terrain Awareness CUDA Kernels
 @cuda.jit
 def sample_terrain_kernel(rng_states, ground_truth, terrain_xy, terrain_elev,
                           px, py, theta, sensor_offset, sensor_radius, n_points, 
@@ -532,7 +530,24 @@ def sample_slope_kernel(terrain_xy, terrain_elev, n_points, cx, cy, out):
     if tid == 0:
         out[0] = z_est
         out[1] = 2.0 * sh_sx[0] / W  # Slope in x direction
-        out[2] = 2.0 * sh_sy[0] / W  # Slope in y direction
+        out[2] = 2.0 * sh_sy[0] / W  # Slope in y direction"""
+
+@cuda.jit(device=True)
+def get_trav_cost(px, py, trav_cost, origin_x, origin_y, cell_size):
+    # Compute the traversal cost at position (px, py) by looking up the corresponding cell in the trav_cost grid
+    gx = (px - origin_x) / cell_size
+    gy = (py - origin_y) / cell_size
+
+    ix = int(gx)
+    iy = int(gy)
+
+    # Clamp indices to be within bounds
+    nx = trav_cost.shape[0]
+    ny = trav_cost.shape[1]
+    ix = max(0, min(nx - 1, ix))
+    iy = max(0, min(ny - 1, iy))
+
+    return trav_cost[ix, iy]
 
 @cuda.jit
 def mc_cost_and_min_dist_kernel(
@@ -543,9 +558,7 @@ def mc_cost_and_min_dist_kernel(
         poly_vertices, poly_starts, poly_lengths, num_polys,
         d_safe, Q_obs, robot_radius,
         num_samples, horizon, state_dim, control_dim, bounds,
-        sensed_slope,
-        sensed_cx, sensed_cy, sensed_radius,
-        Q_slope, Q_elev, pz):
+        Q_trav, trav_cost_map, trav_info):
     """
     Single-pass kernel that computes both MPPI cost and minimum clearance.
 
@@ -585,7 +598,7 @@ def mc_cost_and_min_dist_kernel(
                     obs_px = circle_pred[r, c, t, 0]
                     obs_py = circle_pred[r, c, t, 1]
                     dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
-                    if dist < d_safe:
+                    if dist < d_safe + 0.25:
                         obs_cost += Q_obs * (d_safe - dist + robot_radius)
                     if dist < min_d:
                         min_d = dist
@@ -602,6 +615,10 @@ def mc_cost_and_min_dist_kernel(
                 d_clr = dist - robot_radius
                 if d_clr < min_d:
                     min_d = d_clr
+
+            # Traversability cost
+            trav_cost = get_trav_cost(px, py, trav_cost_map, trav_info[0], trav_info[1], trav_info[2])
+            cost += Q_trav *trav_cost
 
             # Deterministic polygon cost + clearance
             for p in range(num_polys):
@@ -632,23 +649,6 @@ def mc_cost_and_min_dist_kernel(
             # Goal reward
             if math.sqrt((px - x_goal[0]) ** 2 + (py - x_goal[1]) ** 2) < robot_radius:
                 cost -= 100.0  # Reward for being within goal radius
-
-            # Terrain cost - only add if within sensed region to avoid penalizing trajectories for unknown terrain
-            d2x = px - sensed_cx
-            d2y = py - sensed_cy
-            if d2x * d2x + d2y * d2y < sensed_radius * sensed_radius:
-                # Sample slope and elevation from sensed terrain
-                z_est, slope_x, slope_y = sensed_slope
-                slope_cost = Q_slope * (slope_x*slope_x + slope_y*slope_y) / horizon
-                elev_cost  = Q_elev * math.fabs(z_est - pz) / horizon
-                cost += slope_cost + elev_cost
-
-                rx = -math.sin(theta)
-                ry = math.cos(theta)
-                roll_slope = slope_x * rx + slope_y * ry
-                ROLL_SLOPE_MAX = 0.3 # Approximately sin(17 degrees), chosen based on typical robot capabilities and safety margins
-                if roll_slope > ROLL_SLOPE_MAX:  # Threshold for excessive slope
-                    cost += 0.9 * Q_obs * (roll_slope - ROLL_SLOPE_MAX)  # Penalize excessive slope in the direction of roll
 
         # Terminal cost
         terminal_cost = 0.0

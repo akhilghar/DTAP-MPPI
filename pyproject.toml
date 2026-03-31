@@ -19,4 +19,4 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["controllers*", "environments*", "dynamics*"]
+include = ["controllers*", "environments*", "dynamics*", "terrain_estimators*"]

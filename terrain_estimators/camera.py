@@ -2,7 +2,7 @@ import numpy as np
 from typing import Tuple, Callable
 from numba import cuda
 
-from estimator_kernels import (
+from terrain_estimators.estimator_kernels import (
     ray_to_terrain_kernel
 )
 
@@ -125,7 +125,7 @@ class Camera:
         }
     
     def get_point_cloud(self, robot_position: np.ndarray, robot_heading: float, 
-                        d_heightmap: cuda.device_array.DeviceNDArray,
+                        d_heightmap,
                         heightmap_origin: np.ndarray, heightmap_cell_size: float,
                         noise_sigma: float = 0.5) -> dict:
         

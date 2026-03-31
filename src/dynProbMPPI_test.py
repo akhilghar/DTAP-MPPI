@@ -6,6 +6,8 @@ import time
 from controllers.mppi_dynObs import MPPIDynObs, MPPIConfig
 from dynamics.models import DYNAMICS_REGISTRY
 from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, ObstacleMode
+from terrain_estimators.DEM_builder import DEMBuilder
+from terrain_estimators.camera import Camera
 
 # ============================================================================
 # Setup Environment
@@ -16,12 +18,12 @@ env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,5):
+for i in range(0,6):
     env.add_obstacle(
         Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
                  radius=0.3+0.2*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
-                 mode=ObstacleMode.AVOIDANT)
+                 mode=ObstacleMode.APATHETIC)
     )
 
 # Add static circular obstacles
@@ -63,9 +65,9 @@ else:
     Q_mod=np.diag([10.0, 10.0, 7.0, 10.0, 20.0])
     Qf_mod=np.diag([40.0, 40.0, 2.0, 5.0, 5.0])
     R_mod = np.eye(control_dim)
-    umin_mod = np.array([-3.0, -3.0])
-    umax_mod = np.array([3.0, 3.0])
-    noise_mod = np.array([0.75, 0.75])
+    umin_mod = np.array([-2.5, -2.5])
+    umax_mod = np.array([2.5, 2.5])
+    noise_mod = np.array([0.65, 0.65])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
     x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
@@ -76,16 +78,16 @@ config = MPPIConfig(
     num_samples=20000,
     horizon=40,
     dt=0.05,
-    lambda_=30.0, # increase temperature for smoother trajectory
+    lambda_=25.0, # increase temperature for smoother trajectory
 
     Q=Q_mod,
     Qf=Qf_mod,
     R=R_mod,
 
     Q_obs=250.0,
-    d_safe=env.robot_radius + 0.15,
+    d_safe=env.robot_radius + 0.1,
 
-    dynamics_params=np.array([2*env.robot_radius, 0.1]),
+    dynamics_params=np.array([2*env.robot_radius, 0.2]),
 
     u_min=umin_mod,
     u_max=umax_mod,
@@ -94,8 +96,23 @@ config = MPPIConfig(
 )
 
 # print(config)
+cam = Camera(
+    focal_length=0.02,
+    sensor_size=(0.04, 0.03),
+    image_size=(640, 480),
+    mounting_height=0.5,
+    mounting_angle=5.0,
+    baseline=0.1,
+    max_range=5.0
+)
 
-mppi = MPPIDynObs(config, model.gpu, environment=env)
+dem = DEMBuilder(
+    origin=(env.bounds[0], env.bounds[2]),
+    cell_size=0.1,
+    grid_size=(120, 120)
+)
+
+mppi = MPPIDynObs(config, model.gpu, environment=env, camera=cam, dem_builder=dem)
 
 # ============================================================================
 # Simulation
@@ -155,13 +172,6 @@ for step in range(num_steps):
         print(f"Reached goal at step {step}")
         goal_reached = True
         break
-
-    terrain_xy, terrain_elev, sensed_slope = mppi.get_local_terrain()
-    sensed_center = np.array([
-        x_query[0] + config.sensor_offset * np.cos(x_query[2]),
-        x_query[1] + config.sensor_offset * np.sin(x_query[2]),
-    ], dtype=np.float32)
-    terrain_snapshots[step] = (terrain_xy, terrain_elev, sensed_slope, sensed_center)
 
     if step % 20 == 0:
         rollout_snapshots[step] = mppi.get_rollout_snapshot(n=5)
@@ -233,30 +243,6 @@ terrain_scatter = ax.scatter(
     s=12,
     alpha=0.75,
     zorder=5,
-)
-
-sensed_region_patch = Circle(
-    (0.0, 0.0),
-    config.sensor_radius,
-    fill=False,
-    linestyle='--',
-    linewidth=2.0,
-    edgecolor='cyan',
-    zorder=6,
-)
-ax.add_patch(sensed_region_patch)
-
-sensed_center_marker, = ax.plot([], [], marker='x', color='cyan', markersize=8, zorder=7)
-slope_line, = ax.plot([], [], color='magenta', linewidth=2, zorder=7)
-slope_text = ax.text(
-    0.68,
-    0.98,
-    '',
-    transform=ax.transAxes,
-    va='top',
-    ha='left',
-    fontsize=9,
-    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'),
 )
 
 # Draw boundary
@@ -331,36 +317,8 @@ def update(frame):
         for j, line in enumerate(sample_rollout_lines):
             line.set_data(sample_trajs[j, :, 0], sample_trajs[j, :, 1])
 
-    # Update sensed-terrain overlay every frame.
-    if frame in terrain_snapshots:
-        terrain_xy, terrain_elev, sensed_slope, sensed_center = terrain_snapshots[frame]
-
-        terrain_scatter.set_offsets(terrain_xy)
-        terrain_scatter.set_array(terrain_elev)
-
-        sensed_region_patch.center = (float(sensed_center[0]), float(sensed_center[1]))
-        sensed_center_marker.set_data([float(sensed_center[0])], [float(sensed_center[1])])
-
-        slope_vec = sensed_slope[1:3]
-        slope_mag = float(np.linalg.norm(slope_vec))
-        if slope_mag > 1e-6:
-            slope_dir = slope_vec / slope_mag
-        else:
-            slope_dir = np.array([0.0, 0.0], dtype=np.float32)
-
-        slope_scale = 0.8 * config.sensor_radius
-        sx, sy = float(sensed_center[0]), float(sensed_center[1])
-        ex = sx + slope_scale * float(slope_dir[0])
-        ey = sy + slope_scale * float(slope_dir[1])
-        slope_line.set_data([sx, ex], [sy, ey])
-        slope_text.set_text(
-            f"z_est={float(sensed_slope[0]):.3f}\n"
-            f"|slope|={slope_mag:.3f}\n"
-            f"step={frame}"
-        )
-
     return ([robot_patch, traj_line, heading_line, selected_rollout_line,
-             terrain_scatter, sensed_region_patch, sensed_center_marker, slope_line, slope_text]
+             terrain_scatter]
             + sample_rollout_lines + obstacle_patches)
 
 ani = animation.FuncAnimation(
