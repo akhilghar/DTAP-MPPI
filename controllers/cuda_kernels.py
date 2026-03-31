@@ -618,7 +618,7 @@ def mc_cost_and_min_dist_kernel(
 
             # Traversability cost
             trav_cost = get_trav_cost(px, py, trav_cost_map, trav_info[0], trav_info[1], trav_info[2])
-            cost += Q_trav *trav_cost
+            cost += Q_trav * trav_cost
 
             # Deterministic polygon cost + clearance
             for p in range(num_polys):

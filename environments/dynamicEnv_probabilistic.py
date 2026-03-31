@@ -189,7 +189,7 @@ class ProbabilisticEnv:
         self.obstacles: List[Obstacle] = []
 
         self.terrain = None  # Placeholder for future terrain-aware behavior
-        self.dx = 0.2 # Terrain grid resolution in x direction
+        self.dx = 0.05 # Terrain grid resolution in x direction
         self.dy = self.dx # Terrain grid resolution in y direction
 
     def add_obstacle(self, obstacle: Obstacle) -> None:
@@ -401,11 +401,7 @@ class ProbabilisticEnv:
         terrain_goalpos_y = int((10.0-ymin) / self.dy) # Change this if the goal is not at (10,10)
 
         self.terrain = 0.3*np.linalg.norm(np.array([self.dx, self.dy]))*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
-        if self.dx > 0.5:  # Only clear a flat area for visualization if the terrain is coarse enough to be visually distracting
-            self.terrain[max(0, terrain_startpos_x-int(2/self.dx)):terrain_startpos_x+int(2/self.dx), max(0, terrain_startpos_y-int(2/self.dy)):terrain_startpos_y+int(2/self.dy)] = 0.0  # Clear a flat area around the origin for better visualization
 
-        # Prevent goal from being on a steep slope by clearing a flat area around the goal as well
-        # self.terrain[max(0, terrain_goalpos_x-int(1/self.dx)):min(terrain_goalpos_x+int(1/self.dx), terrain_size_x), max(0, terrain_goalpos_y-int(1/self.dy)):min(terrain_goalpos_y+int(1/self.dy), terrain_size_y)] = 0.0
 
     def get_visualization_data(self) -> dict:
         return {

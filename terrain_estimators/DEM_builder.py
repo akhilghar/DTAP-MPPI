@@ -28,56 +28,56 @@ def _fuse_point(points, sigmas, patch_sizes, elevation, precision, confidence,
 
         for r in range(min_r, max_r + 1):
             for c in range(min_c, max_c + 1):
-                if not observed[r, c]:
-                    elevation[r, c] = z_new
-                    precision[r, c] = sigma_new
-                    confidence[r, c] = conf_point
-                    observed[r, c] = True
+                if not observed[c, r]:
+                    elevation[c, r] = z_new
+                    precision[c, r] = sigma_new
+                    confidence[c, r] = conf_point
+                    observed[c, r] = True
                 else:
-                    prec_old = precision[r, c]
-                    conf_old = confidence[r, c]
-                    z_old = elevation[r, c]
+                    prec_old = precision[c, r]
+                    conf_old = confidence[c, r]
+                    z_old = elevation[c, r]
 
                     conf_total = conf_old + conf_point
                     if conf_total == 0:
                         continue
 
-                    elevation[r, c] = (conf_old * z_old + conf_point * z_new) / conf_total
-                    precision[r, c] = (conf_old * prec_old + conf_point * sigma_new) / conf_total
-                    confidence[r, c] = conf_total
+                    elevation[c, r] = (conf_old * z_old + conf_point * z_new) / conf_total
+                    precision[c, r] = (conf_old * prec_old + conf_point * sigma_new) / conf_total
+                    confidence[c, r] = conf_total
 
 
 @njit
 def _compute_slope(rows, cols, elevation, observed, cell_size):
-    slope = np.full((rows, cols), np.inf, dtype=np.float32)
+    slope = np.full((cols, rows), 100.0, dtype=np.float32)
 
-    for r in range(1, rows - 1):
-        for c in range(1, cols - 1):
-            if not (observed[r, c] and
-                    observed[r-1, c] and observed[r+1, c] and
-                    observed[r, c-1] and observed[r, c+1]):
+    for c in range(1, cols - 1):
+        for r in range(1, rows - 1):
+            if not (observed[c, r] and
+                    observed[c-1, r] and observed[c+1, r] and
+                    observed[c, r-1] and observed[c, r+1]):
                 continue
 
-            dz_dx = (elevation[r, c+1] - elevation[r, c-1]) / (2 * cell_size)
-            dz_dy = (elevation[r+1, c] - elevation[r-1, c]) / (2 * cell_size)
-            slope[r, c] = np.sqrt(dz_dx**2 + dz_dy**2)
+            dz_dx = (elevation[c, r+1] - elevation[c, r-1]) / (2 * cell_size)
+            dz_dy = (elevation[c+1, r] - elevation[c-1, r]) / (2 * cell_size)
+            slope[c, r] = np.sqrt(dz_dx**2 + dz_dy**2)
 
     return slope
 
 
 @njit
 def _compute_roughness(window, rows, cols, elevation, observed):
-    roughness = np.full((rows, cols), np.inf, dtype=np.float32)
+    roughness = np.full((cols, rows), 100.0, dtype=np.float32)
 
-    for r in range(window, rows - window):
-        for c in range(window, cols - window):
-            patch = elevation[r-window:r+window+1, c-window:c+window+1]
-            obs_patch = observed[r-window:r+window+1, c-window:c+window+1]
+    for c in range(window, cols - window):
+        for r in range(window, rows - window):
+            patch = elevation[c-window:c+window+1, r-window:r+window+1]
+            obs_patch = observed[c-window:c+window+1, r-window:r+window+1]
 
             if not np.all(obs_patch):
                 continue
 
-            roughness[r, c] = np.var(patch)
+            roughness[c, r] = np.var(patch)
 
     return roughness
 
@@ -147,7 +147,7 @@ class DEMBuilder:
         roughness = _compute_roughness(2, self.grid_size[0], self.grid_size[1],
                                        self.elevation, self.observed)
 
-        # weights — tune these to your robot
+        # weights
         w_slope = 5.0
         w_rough = 10.0
         w_uncertain = 2.0
@@ -166,6 +166,7 @@ class DEMBuilder:
         )
 
         # unobserved cells get a high default cost
-        cost[~self.observed] = 100.0
+        cost = np.where(np.isfinite(cost), cost, 20.0) 
+        cost[~self.observed] = 20.0
 
         return cost

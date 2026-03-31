@@ -23,12 +23,12 @@ for i in range(0,6):
         Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
                  radius=0.3+0.2*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
-                 mode=ObstacleMode.APATHETIC)
+                 mode=ObstacleMode.AVOIDANT)
     )
 
 # Add static circular obstacles
 env.add_obstacle(
-    Obstacle(position=[5.0, 5.0], 
+    Obstacle(position=[3.0, 5.0], 
              radius=2.0,
              velocity=[0.0, 0.0],
              mode=ObstacleMode.STATIC)
@@ -62,8 +62,8 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([10.0, 10.0, 7.0, 10.0, 20.0])
-    Qf_mod=np.diag([40.0, 40.0, 2.0, 5.0, 5.0])
+    Q_mod=np.diag([1.0, 1.0, 0.7, 1.0, 2.0])
+    Qf_mod=np.diag([50.0, 50.0, 5.0, 10.0, 10.0])
     R_mod = np.eye(control_dim)
     umin_mod = np.array([-2.5, -2.5])
     umax_mod = np.array([2.5, 2.5])
@@ -71,7 +71,7 @@ else:
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
     x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
-    x_goal = np.array([10.0, 10.0, np.pi/4, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])
 
 
 config = MPPIConfig(
@@ -100,7 +100,7 @@ cam = Camera(
     focal_length=0.02,
     sensor_size=(0.04, 0.03),
     image_size=(640, 480),
-    mounting_height=0.5,
+    mounting_height=0.3,
     mounting_angle=5.0,
     baseline=0.1,
     max_range=5.0
@@ -109,7 +109,7 @@ cam = Camera(
 dem = DEMBuilder(
     origin=(env.bounds[0], env.bounds[2]),
     cell_size=0.1,
-    grid_size=(120, 120)
+    grid_size=(140, 140)
 )
 
 mppi = MPPIDynObs(config, model.gpu, environment=env, camera=cam, dem_builder=dem)
@@ -174,6 +174,11 @@ for step in range(num_steps):
         break
 
     if step % 20 == 0:
+        if step > 0:
+            recent_displacement = np.linalg.norm(trajectory[-1][:2] - trajectory[-21][:2])
+            if recent_displacement < 0.2:
+                mppi.reset_warm_start()  # If robot is stuck, reset warm start to encourage exploration
+
         rollout_snapshots[step] = mppi.get_rollout_snapshot(n=5)
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
               f"position_error={np.linalg.norm(x[:2]-x_goal[:2]):.2f}, "
@@ -276,7 +281,7 @@ traj_line, = ax.plot([], [], 'b-', linewidth=2)
 # Rollout visualization: sample trajectories + selected (weighted-mean) trajectory
 N_DISPLAY_ROLLOUTS = 5
 sample_rollout_lines = [
-    ax.plot([], [], color='orange', alpha=0.25, linewidth=0.8, zorder=1)[0]
+    ax.plot([], [], color='orange', alpha=0.25, linewidth=1.5, zorder=1)[0]
     for _ in range(N_DISPLAY_ROLLOUTS)
 ]
 selected_rollout_line, = ax.plot([], [], color='lime', alpha=0.85, linewidth=1.5, zorder=2)

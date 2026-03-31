@@ -45,7 +45,7 @@ class MPPIConfig:
     obs_cost_type: str = 'barrier'
 
     # Terrain parameters
-    Q_trav: float = 10.0  # Traversability cost weight
+    Q_trav: float = 1.0  # Traversability cost weight
 
     # Dynamics parameters
     dynamics_params: np.ndarray = None
@@ -63,7 +63,7 @@ class MPPIConfig:
 
     # Probabilistic obstacle prediction parameters
     obs_pred_rollouts: int = 40          # MC rollouts for GPU obstacle trajectory prediction
-    obs_direction_change_prob: float = 0.05
+    obs_direction_change_prob: float = 0.01
     max_obstacles: int = 20              # capacity for preallocated obstacle GPU buffers
 
     def __post_init__(self):
@@ -337,7 +337,7 @@ class MPPIDynObs:
         # ---- Camera terrain sensing and processing (slope/elevation estimation) ----
         point_cloud = self.camera.get_point_cloud(
             robot_position=x0[:2],
-            robot_heading=np.degrees(x0[3]),
+            robot_heading=np.degrees(x0[2]),
             d_heightmap=self.d_terrain,
             heightmap_origin=np.array([self.environment.bounds[0], self.environment.bounds[2]], dtype=np.float32),
             heightmap_cell_size=self.environment.dx,
@@ -451,8 +451,8 @@ class MPPIDynObs:
 
         cuda.synchronize()
         t6 = time.perf_counter()
-        print(f"MPPI solve timings (s): sample_gen={1000*(t1-t0):.1f}ms, "
-              f"obs_rollout={1000*(t2-t1):.1f}ms, rollout={1000*(t3-t2):.1f}ms, terrain_sample={1000*(t4-t3):.1f}ms, cost={1000*(t5-t4):.1f}ms, cpu={1000*(t6-t5):.1f}ms")
+        # print(f"MPPI solve timings (s): sample_gen={1000*(t1-t0):.1f}ms, "
+        #      f"obs_rollout={1000*(t2-t1):.1f}ms, rollout={1000*(t3-t2):.1f}ms, terrain_sample={1000*(t4-t3):.1f}ms, cost={1000*(t5-t4):.1f}ms, cpu={1000*(t6-t5):.1f}ms")
 
         if return_trajectory:
             return u_opt, trajectory, is_safe
