@@ -189,7 +189,7 @@ class ProbabilisticEnv:
         self.obstacles: List[Obstacle] = []
 
         self.terrain = None  # Placeholder for future terrain-aware behavior
-        self.dx = 0.05 # Terrain grid resolution in x direction
+        self.dx = 0.5 # Terrain grid resolution in x direction
         self.dy = self.dx # Terrain grid resolution in y direction
 
     def add_obstacle(self, obstacle: Obstacle) -> None:
@@ -411,6 +411,34 @@ class ProbabilisticEnv:
                 for obs in self.obstacles
             ],
         }
+    
+    def get_static_obstacle_costmap(self, grid_size: Tuple[int, int], cell_size: float,
+                                     origin: Tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
+        costmap = np.zeros(grid_size, dtype=np.float32)
+        origin_x, origin_y = origin
+
+        for obs in self.obstacles:
+            if obs.mode == ObstacleMode.STATIC:
+                # Compute the grid cells that fall within the obstacle's radius
+                obs_x, obs_y = obs.position
+                obs_r = obs.radius
+
+                # Determine the bounding box of the obstacle in grid coordinates
+                # (offset by origin so cell indices match the grid's coordinate frame)
+                x_min = int(max(0, (obs_x - obs_r - origin_x) / cell_size))
+                x_max = int(min(grid_size[0] - 1, (obs_x + obs_r - origin_x) / cell_size))
+                y_min = int(max(0, (obs_y - obs_r - origin_y) / cell_size))
+                y_max = int(min(grid_size[1] - 1, (obs_y + obs_r - origin_y) / cell_size))
+
+                for x in range(x_min, x_max + 1):
+                    for y in range(y_min, y_max + 1):
+                        cell_center_x = origin_x + x * cell_size + cell_size / 2.0
+                        cell_center_y = origin_y + y * cell_size + cell_size / 2.0
+                        dist_to_obs = np.linalg.norm(np.array([cell_center_x - obs_x, cell_center_y - obs_y]))
+                        if dist_to_obs <= obs_r:
+                            costmap[x, y] = 100.0  # Mark as occupied
+
+        return costmap
 
     def step(self, dt: float, robot_pos: Optional[np.ndarray] = None) -> None:
         self.move_obstacles(dt, robot_pos=robot_pos)

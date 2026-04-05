@@ -1,14 +1,4 @@
-MPPI Simulation Trials
-N = 15 per Model
-Robot Radius = 0.2 m
+Use D* Lite Path Planner with MPPI
+OR Invariant Sets with Barrier Functions (more trendy methodology)
 
-Test 1: Dynamics Models
-# Obstacles = 8; Corridor Width = 4.0 m
-Bicycle:
-01: time per step = 0.057s, safe rate = 0.96, total sim time = 18.13s, reached = false, steps taken = 301, fileID = 18.34
-02: time per step = 0.056s, safe rate = 0.95, total sim time = 9.90s, reached = true, steps taken = 157, fileID = 10.04
-03: time per step = 0.056s, safe rate = 0.98, total sim time = 10.35s, reached = true, steps taken = 165, fileID = 10.57
-04: time per step = 0.056s, safe rate = 0.86, total sim time = 10.07s, reached = true, steps taken = 160, fileID = 10.29
-05: time per step = 0.056s, safe rate = 0.84, total sim time = 10.40s, reached = true, steps taken = 166, fileID = 10.61
-06: time per step = 0.057s, safe rate = 0.92, total sim time = 9.87s, reached = true, steps taken = 156, fileID = 10.57
-07: time per step = 0.057s, safe rate = 0.88, total sim time = 
+

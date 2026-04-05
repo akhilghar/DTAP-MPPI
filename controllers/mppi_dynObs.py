@@ -18,9 +18,6 @@ from controllers.cuda_kernels import (
     expected_controls_coalesced_kernel
 )
 
-from terrain_estimators.camera import Camera
-from terrain_estimators.DEM_builder import DEMBuilder
-
 
 @dataclass
 class MPPIConfig:
@@ -45,7 +42,7 @@ class MPPIConfig:
     obs_cost_type: str = 'barrier'
 
     # Terrain parameters
-    Q_trav: float = 1.0  # Traversability cost weight
+    Q_trav: float = 2.0  # Traversability cost weight
 
     # Dynamics parameters
     dynamics_params: np.ndarray = None
@@ -58,7 +55,7 @@ class MPPIConfig:
     noise_sigma: np.ndarray = None
 
     # Covariance adaptation parameters
-    covariance_max_scale: float = 4.0   # maximum multiplier on base sigma when in danger
+    covariance_max_scale: float = 7.0   # maximum multiplier on base sigma when in danger
     covariance_decay: float = 0.7       # per-step decay rate back toward base when recovering
 
     # Probabilistic obstacle prediction parameters
@@ -84,7 +81,7 @@ class MPPIConfig:
 
 
 class MPPIDynObs:
-    def __init__(self, config: MPPIConfig, dynamics_func: Callable, environment, camera: Camera, dem_builder: DEMBuilder):
+    def __init__(self, config: MPPIConfig, dynamics_func: Callable, environment):
 
         if not hasattr(dynamics_func, 'metadata'):
             raise ValueError("Dynamics function must have metadata for state_dim, control_dim, and params_dim.")
@@ -131,9 +128,6 @@ class MPPIDynObs:
         # RNG states for obs_mc_rollout_kernel — lazily grown as obstacle count changes
         self._obs_rng_states   = None
         self._obs_rng_n_states = 0
-
-        self.camera = camera
-        self.dem_builder = dem_builder
 
         self._allocate_gpu_memory()
 
@@ -201,20 +195,13 @@ class MPPIDynObs:
         # ---- Terrain buffers ----
         self.d_terrain = cuda.to_device(self.environment.terrain.astype(np.float32))
         self.d_terrain_info = cuda.to_device(self.terrain_info)
-        dem_rows, dem_cols = self.dem_builder.grid_size
-        self.d_trav_cost = cuda.device_array((dem_rows, dem_cols), dtype=np.float32)
-        cuda.to_device(np.full((dem_rows, dem_cols), 100.0, dtype=np.float32), to=self.d_trav_cost)
-        self.d_trav_info = cuda.to_device(np.array([self.dem_builder.origin[0], self.dem_builder.origin[1], self.dem_builder.cell_size], dtype=np.float32))
 
         self._last_expected_traj = None
 
         total_bytes = (
             self.d_samples.nbytes + self.d_trajectories.nbytes +
             self.d_costs.nbytes   + self.d_min_dists.nbytes    +
-            self.d_weights.nbytes + self.d_obs_rollouts.nbytes +
-            self.d_terrain.nbytes + self.d_terrain_info.nbytes +
-            self.d_trav_cost.nbytes + self.d_trav_info.nbytes
-
+            self.d_weights.nbytes + self.d_obs_rollouts.nbytes
         )
         print(f"Allocated GPU memory: {total_bytes / 1e6:.2f} MB")
 
@@ -334,35 +321,17 @@ class MPPIDynObs:
         cuda.synchronize()
         t3 = time.perf_counter()
 
-        # ---- Camera terrain sensing and processing (slope/elevation estimation) ----
-        point_cloud = self.camera.get_point_cloud(
-            robot_position=x0[:2],
-            robot_heading=np.degrees(x0[2]),
-            d_heightmap=self.d_terrain,
-            heightmap_origin=np.array([self.environment.bounds[0], self.environment.bounds[2]], dtype=np.float32),
-            heightmap_cell_size=self.environment.dx,
-            noise_sigma=0.5
-        )
-        self.dem_builder.fuse_point_cloud(point_cloud)
-        trav_cost = self.dem_builder.get_traversability_cost().astype(np.float32)
-        cuda.to_device(trav_cost, to=self.d_trav_cost)
-
-        cuda.synchronize()
-        t4 = time.perf_counter()
-
         # ---- Single-pass cost + min_dist ----
         mc_cost_and_min_dist_kernel[blocks, threads](
             self.d_trajectories, self.d_samples, self.d_costs, self.d_min_dists,
-            self.d_x_goal, self.d_Q_diag, self.d_R_diag, self.d_Qf_diag,
+            self.d_x0, self.d_x_goal, self.d_Q_diag, self.d_R_diag, self.d_Qf_diag,
             d_circle_pred, d_circle_radii, int(circle_count), R,
             d_rect_pos, d_rect_widths, d_rect_heights, d_rect_angles, int(rect_count),
             d_poly_verts, d_poly_starts, d_poly_lengths, int(poly_count),
             self.config.d_safe, self.config.Q_obs, robot_radius,
             self.config.num_samples, self.config.horizon,
             self.config.state_dim, self.config.control_dim,
-            self.environment.bounds,
-            float(self.config.Q_trav),
-            self.d_trav_cost, self.d_trav_info
+            self.environment.bounds
         )
         cuda.synchronize()
         t5 = time.perf_counter()

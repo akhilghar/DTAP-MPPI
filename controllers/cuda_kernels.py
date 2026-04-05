@@ -552,13 +552,12 @@ def get_trav_cost(px, py, trav_cost, origin_x, origin_y, cell_size):
 @cuda.jit
 def mc_cost_and_min_dist_kernel(
         trajectories, samples, costs, min_dists,
-        x_goal, Q_diag, R_diag, Qf_diag,
+        x0, x_goal, Q_diag, R_diag, Qf_diag,
         circle_pred, circle_radii, num_circles, num_obs_rollouts,
         rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
         poly_vertices, poly_starts, poly_lengths, num_polys,
         d_safe, Q_obs, robot_radius,
-        num_samples, horizon, state_dim, control_dim, bounds,
-        Q_trav, trav_cost_map, trav_info):
+        num_samples, horizon, state_dim, control_dim, bounds):
     """
     Single-pass kernel that computes both MPPI cost and minimum clearance.
 
@@ -577,8 +576,8 @@ def mc_cost_and_min_dist_kernel(
         for t in range(horizon):
             state_cost = 0.0
             for i in range(state_dim):
-                diff = trajectories[idx, t, i] - x_goal[i]
-                state_cost += Q_diag[i] * diff * diff
+                diff_goal = trajectories[idx, t, i] - x_goal[i]
+                state_cost += Q_diag[i] * diff_goal * diff_goal
 
             control_cost = 0.0
             for i in range(control_dim):
@@ -589,7 +588,6 @@ def mc_cost_and_min_dist_kernel(
 
             px = trajectories[idx, t, 0]
             py = trajectories[idx, t, 1]
-            theta = trajectories[idx, t, 2]
 
             # MC circle cost (average over rollouts) + worst-case min_dist
             obs_cost = 0.0
@@ -615,10 +613,6 @@ def mc_cost_and_min_dist_kernel(
                 d_clr = dist - robot_radius
                 if d_clr < min_d:
                     min_d = d_clr
-
-            # Traversability cost
-            trav_cost = get_trav_cost(px, py, trav_cost_map, trav_info[0], trav_info[1], trav_info[2])
-            cost += Q_trav * trav_cost
 
             # Deterministic polygon cost + clearance
             for p in range(num_polys):

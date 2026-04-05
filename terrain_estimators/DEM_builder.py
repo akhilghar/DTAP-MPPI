@@ -167,6 +167,27 @@ class DEMBuilder:
 
         # unobserved cells get a high default cost
         cost = np.where(np.isfinite(cost), cost, 20.0) 
-        cost[~self.observed] = 20.0
+        cost[~self.observed] = 10.0
 
         return cost
+    
+    def get_cost_at_points(self, points_xy: np.ndarray) -> np.ndarray:
+        grid_coords = self.world_to_grid(points_xy)
+        rows = np.clip(np.floor(grid_coords[:, 1]).astype(int), 0, self.grid_size[0] - 1)
+        cols = np.clip(np.floor(grid_coords[:, 0]).astype(int), 0, self.grid_size[1] - 1)
+        cost = self.get_traversability_cost()
+        return cost[rows, cols]
+    
+    def visualize(self):
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(12, 6))
+        plt.subplot(1, 2, 1)
+        plt.title("Elevation")
+        plt.imshow(self.elevation.T, origin='lower', cmap='terrain')
+        plt.colorbar(label='Elevation (m)')
+        plt.subplot(1, 2, 2)
+        plt.title("Traversability Cost")
+        cost = self.get_traversability_cost()
+        plt.imshow(cost.T, origin='lower', cmap='inferno')
+        plt.colorbar(label='Cost')
+        plt.show()

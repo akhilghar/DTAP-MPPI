@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 from controllers.mppi_dynObs import MPPIDynObs, MPPIConfig
+from controllers.waypointSelector import WaypointSelector
 from dynamics.models import DYNAMICS_REGISTRY
 from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, ObstacleMode
 from terrain_estimators.DEM_builder import DEMBuilder
@@ -12,13 +13,14 @@ from terrain_estimators.camera import Camera
 # ============================================================================
 # Setup Environment
 # ============================================================================
+
 # corridor_width = 4.0
 env = ProbabilisticEnv(bounds=(-2, 12, -2, 12), robot_radius=0.3)
 env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,6):
+for i in range(0,5):
     env.add_obstacle(
         Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
                  radius=0.3+0.2*np.random.rand(),
@@ -28,11 +30,15 @@ for i in range(0,6):
 
 # Add static circular obstacles
 env.add_obstacle(
-    Obstacle(position=[3.0, 5.0], 
+    Obstacle(position=[5.0, 5.0], 
              radius=2.0,
              velocity=[0.0, 0.0],
              mode=ObstacleMode.STATIC)
 )
+
+print("Environment Obstacles: ")
+for obs in env.obstacles:
+    print(f"  Position: {obs.position}, Radius: {obs.radius}, Velocity: {obs.velocity}, Mode: {obs.mode}")
 
 # ============================================================================
 # Configure MPPI
@@ -62,32 +68,32 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([1.0, 1.0, 0.7, 1.0, 2.0])
-    Qf_mod=np.diag([50.0, 50.0, 5.0, 10.0, 10.0])
+    Q_mod=np.diag([1.0, 1.0, 0.5, 1.0, 2.0])
+    Qf_mod=np.diag([40.0, 40.0, 0.5, 10.0, 10.0])
     R_mod = np.eye(control_dim)
-    umin_mod = np.array([-2.5, -2.5])
-    umax_mod = np.array([2.5, 2.5])
+    umin_mod = np.array([-3.0, -3.0])
+    umax_mod = np.array([3.0, 3.0])
     noise_mod = np.array([0.65, 0.65])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
-    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])
+    x0 = np.array([0.0, 0.0, np.pi/2, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, np.pi/4, 0.0, 0.0])
 
 
 config = MPPIConfig(
     num_samples=20000,
     horizon=40,
     dt=0.05,
-    lambda_=25.0, # increase temperature for smoother trajectory
+    lambda_=30.0, # increase temperature for smoother trajectory
 
     Q=Q_mod,
     Qf=Qf_mod,
     R=R_mod,
 
-    Q_obs=250.0,
+    Q_obs=190.0,
     d_safe=env.robot_radius + 0.1,
 
-    dynamics_params=np.array([2*env.robot_radius, 0.2]),
+    dynamics_params=np.array([2*env.robot_radius, 0.1]),
 
     u_min=umin_mod,
     u_max=umax_mod,
@@ -103,16 +109,25 @@ cam = Camera(
     mounting_height=0.3,
     mounting_angle=5.0,
     baseline=0.1,
-    max_range=5.0
+    max_range=11.0
 )
 
-dem = DEMBuilder(
-    origin=(env.bounds[0], env.bounds[2]),
-    cell_size=0.1,
-    grid_size=(140, 140)
+env_origin = (env.bounds[0], env.bounds[2])
+env_cell_size = env.dx
+env_grid_size = (int((env.bounds[1] - env.bounds[0]) / env_cell_size), int((env.bounds[3] - env.bounds[2]) / env_cell_size))
+dem = DEMBuilder(origin=env_origin, cell_size=env_cell_size, grid_size=env_grid_size)
+
+waypoint_selector = WaypointSelector(
+    grid_resolution=0.5,
+    grid_half_size=6,
+    goal_weight=1.0,
+    obstacle_weight=10.0,
+    terrain_weight=3.0,
+    heading_weight=1.5,
+    d_safe=config.d_safe
 )
 
-mppi = MPPIDynObs(config, model.gpu, environment=env, camera=cam, dem_builder=dem)
+mppi = MPPIDynObs(config, model.gpu, environment=env)
 
 # ============================================================================
 # Simulation
@@ -121,6 +136,7 @@ mppi = MPPIDynObs(config, model.gpu, environment=env, camera=cam, dem_builder=de
 trajectory = [x0.copy()]
 controls = []
 cov_log = []
+subgoal_log = []
 
 obstacle_history = []
 rollout_snapshots = {}  # step -> (expected_traj, sample_trajs), sampled every 20 steps
@@ -131,20 +147,54 @@ num_steps = 500
 num_safe = 0
 goal_reached = False
 
+perception_interval = 2  # steps
+
 print("Running Dynamic MPPI Simulation...")
 sim_start_time = time.time()
 for step in range(num_steps):
-
     # --- Step environment first (obstacles move) ---
     env.step(config.dt, robot_pos=x[:2])
     obstacle_history.append(
         np.array([obs.position.copy() for obs in env.obstacles])
     )
 
+    if step % perception_interval == 0:
+        point_cloud = cam.get_point_cloud(
+            robot_position=x[:2],
+            robot_heading=x[2],
+            d_heightmap=env.terrain,
+            heightmap_origin=env_origin,
+            heightmap_cell_size=env_cell_size,
+            noise_sigma=0.5
+        )
+        dem.fuse_point_cloud(point_cloud)
+
+    # --- Waypoint Selection ---
+    obs_positions = np.array([obs.position for obs in env.obstacles])
+    obs_radii = np.array([obs.radius for obs in env.obstacles])
+
+    dist_to_goal = np.linalg.norm(x[:2] - x_goal[:2])
+    if dist_to_goal < waypoint_selector.grid_half_size * waypoint_selector.grid_resolution:
+        subgoal = x_goal[:2]
+    else:
+        subgoal = waypoint_selector.plan_step(
+            robot_pos=x[:2],
+            robot_heading=x[2],
+            goal_pos=x_goal[:2],
+            obs_positions=obs_positions,
+            obs_radii=obs_radii,
+            terrain_cost_fn=dem.get_cost_at_points,
+        )
+
+    subgoal_log.append(subgoal)
+
+    mppi_target = x_goal.copy()
+    mppi_target[:2] = subgoal
+
     # --- Get MPPI control ---
     start = time.time()
     x_query = x.copy()
-    u, is_safe = mppi.get_control(x_query, x_goal, require_safe=True)
+    u, is_safe = mppi.get_control(x_query, mppi_target, require_safe=True)
     if is_safe:
         num_safe += 1
 
@@ -168,28 +218,30 @@ for step in range(num_steps):
         vel = 0.5*u[0] + 0.5*u[1]
 
     # --- Goal check ---
-    if (np.linalg.norm(x[:2] - x_goal[:2]) < env.robot_radius) & (vel < 0.01):
-        print(f"Reached goal at step {step}")
+    if (np.linalg.norm(x[:2] - x_goal[:2]) < env.robot_radius):
+        print(f"Goal reached at step {step}!")
         goal_reached = True
         break
 
     if step % 20 == 0:
-        if step > 0:
-            recent_displacement = np.linalg.norm(trajectory[-1][:2] - trajectory[-21][:2])
-            if recent_displacement < 0.2:
-                mppi.reset_warm_start()  # If robot is stuck, reset warm start to encourage exploration
-
-        rollout_snapshots[step] = mppi.get_rollout_snapshot(n=5)
+        rollout_snapshots[step] = mppi.get_rollout_snapshot(n=50)
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
+              f"Subgoal=({subgoal[0]:.2f},{subgoal[1]:.2f}), "
               f"position_error={np.linalg.norm(x[:2]-x_goal[:2]):.2f}, "
               f"orientation=({x[3]*180/np.pi:.1f}deg, {x[4]*180/np.pi:.2f}deg), "
               f"covariance={cov}, "
               f"safe={is_safe}, "
               f"time per step={end-start:.3f}s")
+        
+    if step % 50 == 0 & step > 0:
+        recent_disp = np.linalg.norm(trajectory[-1][:2] - trajectory[-50][:2])
+        if recent_disp < 0.2:
+            mppi.reset_warm_start()
 
 trajectory = np.array(trajectory)
 controls = np.array(controls)
 obstacle_history = np.array(obstacle_history)
+subgoal_log = np.array(subgoal_log)
 sim_end_time = time.time()
 
 print(f"Simulation complete: {len(trajectory)} steps")
@@ -279,7 +331,7 @@ for i in range(obstacle_history.shape[1]):
 traj_line, = ax.plot([], [], 'b-', linewidth=2)
 
 # Rollout visualization: sample trajectories + selected (weighted-mean) trajectory
-N_DISPLAY_ROLLOUTS = 5
+N_DISPLAY_ROLLOUTS = 50
 sample_rollout_lines = [
     ax.plot([], [], color='orange', alpha=0.25, linewidth=1.5, zorder=1)[0]
     for _ in range(N_DISPLAY_ROLLOUTS)
@@ -288,6 +340,9 @@ selected_rollout_line, = ax.plot([], [], color='lime', alpha=0.85, linewidth=1.5
 
 # Goal
 ax.plot(x_goal[0], x_goal[1], 'r*', markersize=15)
+
+# Subgoal
+subgoal_marker, = ax.plot([], [], 'g*', markersize=12, zorder=4)
 
 def update(frame):
     # State Acquisition
@@ -322,8 +377,13 @@ def update(frame):
         for j, line in enumerate(sample_rollout_lines):
             line.set_data(sample_trajs[j, :, 0], sample_trajs[j, :, 1])
 
+    # Update subgoal marker
+    if frame < len(subgoal_log):
+        subgoal = subgoal_log[frame]
+        subgoal_marker.set_data([subgoal[0]], [subgoal[1]])
+
     return ([robot_patch, traj_line, heading_line, selected_rollout_line,
-             terrain_scatter]
+             terrain_scatter, subgoal_marker]
             + sample_rollout_lines + obstacle_patches)
 
 ani = animation.FuncAnimation(
@@ -385,5 +445,6 @@ filename = f'./media/Visualizations/mppi_result_{model_name}_{t_fin:.2f}_dynProb
 plt.savefig(filename, dpi=150)
 # plt.show()
 
-print("Visualization Saved.")
+print("Data Visualization Saved.")
+dem.visualize()
 mppi.free_gpu_buffers()
