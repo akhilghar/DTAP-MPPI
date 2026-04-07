@@ -629,7 +629,6 @@ def mc_cost_and_min_dist_kernel(
                     d_clr = dist - robot_radius
                     if d_clr < min_d:
                         min_d = d_clr
-
             # Boundary cost
             if px < bounds[0] + robot_radius:
                 cost += Q_obs * (bounds[0] + robot_radius - px)

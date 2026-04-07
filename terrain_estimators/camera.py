@@ -132,9 +132,9 @@ class Camera:
         pixels = self.generate_pixel_grid()
         rays = self.pixel_to_rays(pixels)
         
-        theta = np.radians(robot_heading)
-        world_dx = (rays[:, 0] * np.cos(theta) - rays[:, 2] * np.sin(theta)).astype(np.float32)
-        world_dy = (rays[:, 0] * np.sin(theta) + rays[:, 2] * np.cos(theta)).astype(np.float32)
+        theta = robot_heading  # already in radians
+        world_dx = (rays[:, 2] * np.cos(theta) + rays[:, 0] * np.sin(theta)).astype(np.float32)
+        world_dy = (rays[:, 2] * np.sin(theta) - rays[:, 0] * np.cos(theta)).astype(np.float32)
         world_dz = rays[:, 1].astype(np.float32)
 
         self.d_rays_dx.copy_to_device(world_dx)

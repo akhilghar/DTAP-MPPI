@@ -39,19 +39,17 @@ def true_terrain_slope_cuda(px, py, terrain, terrain_info):
     fx = gx - ix
     fy = gy - iy
 
-    # Bilinear interpolation of slope values
+    # Gradient of the bilinear interpolant: dz/dx and dz/dy
+    # These are the actual terrain slopes, not interpolated elevation values
     slope_x = (
-        terrain[ix, iy] * (1 - fx) * (1 - fy) +
-        terrain[ix + 1, iy] * fx * (1 - fy) +
-        terrain[ix, iy + 1] * (1 - fx) * fy +
-        terrain[ix + 1, iy + 1] * fx * fy
-    )
+        (terrain[ix + 1, iy]     - terrain[ix, iy])     * (1 - fy) +
+        (terrain[ix + 1, iy + 1] - terrain[ix, iy + 1]) * fy
+    ) / dx
+
     slope_y = (
-        terrain[ix, iy] * (1 - fx) * (1 - fy) +
-        terrain[ix + 1, iy] * fx * (1 - fy) +
-        terrain[ix, iy + 1] * (1 - fx) * fy +
-        terrain[ix + 1, iy + 1] * fx * fy
-    )
+        (terrain[ix, iy + 1]     - terrain[ix, iy])     * (1 - fx) +
+        (terrain[ix + 1, iy + 1] - terrain[ix + 1, iy]) * fx
+    ) / dy
 
     return slope_x, slope_y
 

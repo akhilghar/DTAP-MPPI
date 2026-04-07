@@ -36,9 +36,9 @@ env.add_obstacle(
              mode=ObstacleMode.STATIC)
 )
 
-print("Environment Obstacles: ")
-for obs in env.obstacles:
-    print(f"  Position: {obs.position}, Radius: {obs.radius}, Velocity: {obs.velocity}, Mode: {obs.mode}")
+#print("Environment Obstacles: ")
+#for obs in env.obstacles:
+#    print(f"  Position: {obs.position}, Radius: {obs.radius}, Velocity: {obs.velocity}, Mode: {obs.mode}")
 
 # ============================================================================
 # Configure MPPI
@@ -76,8 +76,8 @@ else:
     noise_mod = np.array([0.65, 0.65])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([0.0, 0.0, np.pi/2, 0.0, 0.0])
-    x_goal = np.array([10.0, 10.0, np.pi/4, 0.0, 0.0])
+    x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])
 
 
 config = MPPIConfig(
@@ -120,10 +120,10 @@ dem = DEMBuilder(origin=env_origin, cell_size=env_cell_size, grid_size=env_grid_
 waypoint_selector = WaypointSelector(
     grid_resolution=0.5,
     grid_half_size=6,
-    goal_weight=1.0,
-    obstacle_weight=10.0,
-    terrain_weight=3.0,
-    heading_weight=1.5,
+    goal_weight=10.0,
+    obstacle_weight=5.0,
+    terrain_weight=3.5,
+    heading_weight=1.0,
     d_safe=config.d_safe
 )
 
@@ -147,7 +147,7 @@ num_steps = 500
 num_safe = 0
 goal_reached = False
 
-perception_interval = 2  # steps
+perception_interval = 1  # steps
 
 print("Running Dynamic MPPI Simulation...")
 sim_start_time = time.time()
@@ -183,7 +183,7 @@ for step in range(num_steps):
             goal_pos=x_goal[:2],
             obs_positions=obs_positions,
             obs_radii=obs_radii,
-            terrain_cost_fn=dem.get_cost_at_points,
+            terrain_cost_fn=dem.get_cost_at_points
         )
 
     subgoal_log.append(subgoal)
@@ -446,5 +446,28 @@ plt.savefig(filename, dpi=150)
 # plt.show()
 
 print("Data Visualization Saved.")
-dem.visualize()
+
+# DEM Visualization
+plt.figure(figsize=(12, 6))
+plt.subplot(2, 2, 1)
+plt.title("Sensed Terrain Elevation")
+plt.imshow(dem.elevation.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='terrain', alpha=0.75,
+           vmin=terrain_min, vmax=terrain_max)
+plt.colorbar(label='Elevation')
+plt.subplot(2, 2, 2)
+plt.title("Sensed Terrain Cost")
+cost = dem.get_traversability_cost()
+plt.imshow(cost.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='viridis', alpha=0.75)
+plt.colorbar(label='Cost')
+plt.subplot(2, 2, 3)
+plt.title("Ground Truth Terrain")
+plt.imshow(env.terrain.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='terrain', alpha=0.75)
+plt.colorbar(label='Elevation')
+plt.subplot(2, 2, 4)
+plt.title("Sensed Terrain Confidence")
+plt.imshow(dem.confidence.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='plasma', alpha=0.75)
+plt.colorbar(label='Confidence')
+plt.tight_layout()
+dem_filename = f'./media/Visualizations/DEM_rendering/observed_dem_{t_fin:.2f}.png'
+plt.savefig(dem_filename, dpi=150)
 mppi.free_gpu_buffers()

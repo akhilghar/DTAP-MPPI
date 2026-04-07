@@ -49,7 +49,7 @@ def _fuse_point(points, sigmas, patch_sizes, elevation, precision, confidence,
 
 @njit
 def _compute_slope(rows, cols, elevation, observed, cell_size):
-    slope = np.full((cols, rows), 100.0, dtype=np.float32)
+    slope = np.zeros((cols, rows), dtype=np.float32)
 
     for c in range(1, cols - 1):
         for r in range(1, rows - 1):
@@ -58,16 +58,16 @@ def _compute_slope(rows, cols, elevation, observed, cell_size):
                     observed[c, r-1] and observed[c, r+1]):
                 continue
 
-            dz_dx = (elevation[c, r+1] - elevation[c, r-1]) / (2 * cell_size)
-            dz_dy = (elevation[c+1, r] - elevation[c-1, r]) / (2 * cell_size)
-            slope[c, r] = np.sqrt(dz_dx**2 + dz_dy**2)
+            dz_dc = (elevation[c+1, r] - elevation[c-1, r]) / (2 * cell_size)
+            dz_dr = (elevation[c, r+1] - elevation[c, r-1]) / (2 * cell_size)
+            slope[c, r] = np.sqrt(dz_dc**2 + dz_dr**2)
 
     return slope
 
 
 @njit
 def _compute_roughness(window, rows, cols, elevation, observed):
-    roughness = np.full((cols, rows), 100.0, dtype=np.float32)
+    roughness = np.zeros((cols, rows), dtype=np.float32)
 
     for c in range(window, cols - window):
         for r in range(window, rows - window):
@@ -148,7 +148,7 @@ class DEMBuilder:
                                        self.elevation, self.observed)
 
         # weights
-        w_slope = 5.0
+        w_slope = 8.0
         w_rough = 10.0
         w_uncertain = 2.0
 
@@ -177,17 +177,3 @@ class DEMBuilder:
         cols = np.clip(np.floor(grid_coords[:, 0]).astype(int), 0, self.grid_size[1] - 1)
         cost = self.get_traversability_cost()
         return cost[rows, cols]
-    
-    def visualize(self):
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(12, 6))
-        plt.subplot(1, 2, 1)
-        plt.title("Elevation")
-        plt.imshow(self.elevation.T, origin='lower', cmap='terrain')
-        plt.colorbar(label='Elevation (m)')
-        plt.subplot(1, 2, 2)
-        plt.title("Traversability Cost")
-        cost = self.get_traversability_cost()
-        plt.imshow(cost.T, origin='lower', cmap='inferno')
-        plt.colorbar(label='Cost')
-        plt.show()

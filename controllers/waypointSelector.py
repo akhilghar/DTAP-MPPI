@@ -25,7 +25,7 @@ class WaypointSelector:
         center_idx = grid_half_size * self.grid_dim + grid_half_size
         self.offsets = np.delete(self.offsets, center_idx, axis=0)  # Remove the center point (0,0) from the offsets
 
-        self.current_waypoint = np.zeros(2, dtype=np.float32)  # Initialize current waypoint to (0,0)
+        self.current_waypoint = None  # Forces replan on first call
 
     def compute_heuristic(self, candidate_points: np.ndarray, robot_pos: np.ndarray, robot_heading: float,
                           goal_pos: np.ndarray, obs_positions: np.ndarray, obs_radii: np.ndarray,
@@ -36,7 +36,7 @@ class WaypointSelector:
         robot_goal_dist = np.linalg.norm(robot_pos - goal_pos)
         candidate_goal_dist = np.linalg.norm(candidate_points - goal_pos, axis=1)
         progress = robot_goal_dist - candidate_goal_dist  # Positive if candidate is closer to goal
-        h_goal = self.goal_weight * progress  # Closer to goal is better
+        h_goal = -1*self.goal_weight * progress  # Closer to goal is better
 
         # Obstacle heuristic
         if len(obs_positions) > 0:
@@ -64,11 +64,7 @@ class WaypointSelector:
         angle_diff = np.minimum(angle_diff, 2 * np.pi - angle_diff)
         h_heading = self.heading_weight * angle_diff
 
-        # Candidate distance heuristic
-        candidate_dist = np.linalg.norm(candidate_points - robot_pos, axis=1)
-        h_distance = 0.1 * candidate_dist  # Encourage closer waypoints
-
-        return h_goal + h_obs + h_terrain + h_heading + h_distance
+        return h_goal + h_obs + h_terrain + h_heading
 
     def select_waypoint(self, robot_pos: np.ndarray, robot_heading: float,
                         goal_pos: np.ndarray, obs_positions: np.ndarray,
@@ -101,8 +97,10 @@ class WaypointSelector:
         h = self.compute_heuristic(candidate_points, robot_pos, robot_heading,
                                    goal_pos, obs_positions, obs_radii, terrain_costs)
         
-        best_idx = np.argmax(h)
+        best_idx = np.argmin(h)
         self.current_waypoint = candidate_points[best_idx]
+
+        print(f"Selected Waypoint: {self.current_waypoint}, Heuristic Value: {h[best_idx]:.4f}")
 
         return self.current_waypoint
 
@@ -114,9 +112,15 @@ class WaypointSelector:
         if replan_threshold is None:
             replan_threshold = self.grid_resolution
 
+        waypoint_blocked = False
+        if self.current_waypoint is not None and len(obs_positions) > 0:
+            dists_to_wp = np.linalg.norm(self.current_waypoint - obs_positions, axis=1) - obs_radii
+            waypoint_blocked = np.any(dists_to_wp < self.d_safe)
+
         needs_replan = (
             self.current_waypoint is None or
-            np.linalg.norm(self.current_waypoint - robot_pos) < replan_threshold
+            np.linalg.norm(self.current_waypoint - robot_pos) < replan_threshold or
+            waypoint_blocked
         )
 
         if needs_replan:
