@@ -22,6 +22,8 @@ def _fuse_point(points, sigmas, patch_sizes, elevation, precision, confidence,
         if n_cells <= 0:
             continue
 
+        
+
         conf_point = 1.0 / n_cells
         z_new = points[i, 2]
         sigma_new = sigmas[i]
@@ -88,6 +90,8 @@ class DEMBuilder:
         self.cell_size = cell_size
         self.origin = origin
 
+        self.z_baseline = None
+
         # the three arrays that define the DEM
         self.elevation = np.zeros(grid_size, dtype=np.float32)
         self.precision = np.full(grid_size, np.inf, dtype=np.float32)
@@ -130,6 +134,12 @@ class DEMBuilder:
         points = point_cloud["points"]
         sigma = point_cloud["sigma"]
         patch_sizes = point_cloud["patch_size"]
+
+        if self.z_baseline is None:
+            self.z_baseline = float(points[:, 2].mean())
+
+        points = points.copy()
+        points[:, 2] -= self.z_baseline
 
         _fuse_point(points, sigma, patch_sizes,
                     self.elevation, self.precision, self.confidence, self.observed,

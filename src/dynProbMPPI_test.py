@@ -9,6 +9,7 @@ from dynamics.models import DYNAMICS_REGISTRY
 from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, ObstacleMode
 from terrain_estimators.DEM_builder import DEMBuilder
 from terrain_estimators.camera import Camera
+from mpl_toolkits.mplot3d import Axes3D  # for 3D terrain visualization
 
 # ============================================================================
 # Setup Environment
@@ -121,7 +122,7 @@ waypoint_selector = WaypointSelector(
     grid_resolution=0.5,
     grid_half_size=6,
     goal_weight=10.0,
-    obstacle_weight=5.0,
+    obstacle_weight=15.0,
     terrain_weight=3.5,
     heading_weight=1.0,
     d_safe=config.d_safe
@@ -448,26 +449,32 @@ plt.savefig(filename, dpi=150)
 print("Data Visualization Saved.")
 
 # DEM Visualization
-plt.figure(figsize=(12, 6))
-plt.subplot(2, 2, 1)
-plt.title("Sensed Terrain Elevation")
-plt.imshow(dem.elevation.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='terrain', alpha=0.75,
-           vmin=terrain_min, vmax=terrain_max)
-plt.colorbar(label='Elevation')
-plt.subplot(2, 2, 2)
-plt.title("Sensed Terrain Cost")
+nx, ny = dem.grid_size
+x_coords = np.linspace(env.bounds[0], env.bounds[1], nx)
+y_coords = np.linspace(env.bounds[2], env.bounds[3], ny)
+X, Y = np.meshgrid(x_coords, y_coords, indexing='ij')
+
+fig = plt.figure(figsize=(12, 10))
+ax1 = fig.add_subplot(2, 2, 1, projection='3d')
+ax1.set_title("Sensed Terrain Elevation")
+ax1.plot_surface(X, Y, dem.elevation.T, cmap='terrain', alpha=0.75)
+ax1.set_zlim(np.min(env.terrain)-1, np.max(env.terrain)+7)
+ax2 = fig.add_subplot(2, 2, 2)
+ax2.set_title("Sensed Terrain Cost")
 cost = dem.get_traversability_cost()
-plt.imshow(cost.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='viridis', alpha=0.75)
-plt.colorbar(label='Cost')
-plt.subplot(2, 2, 3)
-plt.title("Ground Truth Terrain")
-plt.imshow(env.terrain.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='terrain', alpha=0.75)
-plt.colorbar(label='Elevation')
-plt.subplot(2, 2, 4)
-plt.title("Sensed Terrain Confidence")
-plt.imshow(dem.confidence.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='plasma', alpha=0.75)
-plt.colorbar(label='Confidence')
+im2 = ax2.imshow(cost.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='viridis', alpha=0.75)
+plt.colorbar(im2, label='Cost', ax=ax2)
+ax3 = fig.add_subplot(2, 2, 3, projection='3d')
+ax3.set_title("Ground Truth Terrain")
+ax3.plot_surface(X, Y, env.terrain.T, cmap='terrain', alpha=0.75)
+ax3.set_zlim(np.min(env.terrain)-1, np.max(env.terrain)+7)
+ax4 = fig.add_subplot(2, 2, 4)
+ax4.set_title("Sensed Terrain Confidence")
+im4 = ax4.imshow(dem.confidence.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='plasma', alpha=0.75)
+plt.colorbar(im4, label='Confidence', ax=ax4)
 plt.tight_layout()
 dem_filename = f'./media/Visualizations/DEM_rendering/observed_dem_{t_fin:.2f}.png'
 plt.savefig(dem_filename, dpi=150)
+
+# Free GPU buffers to ensure clean exit and avoid memory leaks
 mppi.free_gpu_buffers()

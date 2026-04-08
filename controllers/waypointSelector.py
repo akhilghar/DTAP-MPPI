@@ -71,7 +71,6 @@ class WaypointSelector:
                         obs_radii: np.ndarray, terrain_cost_fn=None) -> np.ndarray:
         
         candidate_points = (robot_pos + self.offsets)  # (N, 2)
-        n = len(candidate_points)
 
         if len(obs_positions) > 0:
             diff = candidate_points[:, np.newaxis, :] - obs_positions[np.newaxis, :, :]  # (N, M, 2)
@@ -80,15 +79,24 @@ class WaypointSelector:
             min_obs_dist = np.min(surface_dists, axis=1)  # (N,)
             valid_mask = min_obs_dist > self.d_safe
             candidate_points = candidate_points[valid_mask]
-            
+
             if len(candidate_points) == 0:
-                # If all candidates are too close to obstacles, repel from the nearest obstacle
+                # Emergency escape: step away from nearest obstacle until clear of all obstacles
                 nearest_idx = np.argmin(np.linalg.norm(robot_pos - obs_positions, axis=1) - obs_radii)
                 away_dir = robot_pos - obs_positions[nearest_idx]
                 away_dir /= (np.linalg.norm(away_dir) + 1e-6)
-                self.current_waypoint = robot_pos + away_dir * self.grid_resolution
+
+                escape_wp = robot_pos.copy()
+                for _ in range(20):
+                    escape_wp = escape_wp + away_dir * self.grid_resolution
+                    esc_surface_dists = np.linalg.norm(escape_wp - obs_positions, axis=1) - obs_radii
+                    if np.all(esc_surface_dists > self.d_safe):
+                        break
+
+                self.current_waypoint = escape_wp
                 return self.current_waypoint
 
+        n = len(candidate_points)
         if terrain_cost_fn is not None:
             terrain_costs = terrain_cost_fn(candidate_points)  # (N,)
         else:
@@ -96,11 +104,24 @@ class WaypointSelector:
 
         h = self.compute_heuristic(candidate_points, robot_pos, robot_heading,
                                    goal_pos, obs_positions, obs_radii, terrain_costs)
-        
-        best_idx = np.argmin(h)
-        self.current_waypoint = candidate_points[best_idx]
 
-        print(f"Selected Waypoint: {self.current_waypoint}, Heuristic Value: {h[best_idx]:.4f}")
+        # Softmin weighted average (MPPI-style)
+        temperature = 2.0
+        h_shifted = h - np.min(h)
+        weights = np.exp(-h_shifted / temperature)
+        weights /= weights.sum()
+        waypoint = (weights[:, np.newaxis] * candidate_points).sum(axis=0)
+
+        # The weighted average can land inside an obstacle even if all candidates are valid.
+        # Fall back to the best valid candidate (argmin) if the softmin result is unsafe.
+        if len(obs_positions) > 0:
+            wp_surface_dists = np.linalg.norm(waypoint - obs_positions, axis=1) - obs_radii
+            if np.any(wp_surface_dists <= self.d_safe):
+                waypoint = candidate_points[np.argmin(h)]
+
+        self.current_waypoint = waypoint
+
+        print(f"Selected Waypoint: {self.current_waypoint}")
 
         return self.current_waypoint
 
