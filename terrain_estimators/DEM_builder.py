@@ -22,8 +22,6 @@ def _fuse_point(points, sigmas, patch_sizes, elevation, precision, confidence,
         if n_cells <= 0:
             continue
 
-        
-
         conf_point = 1.0 / n_cells
         z_new = points[i, 2]
         sigma_new = sigmas[i]
@@ -158,7 +156,7 @@ class DEMBuilder:
                                        self.elevation, self.observed)
 
         # weights
-        w_slope = 8.0
+        w_slope = 9.0
         w_rough = 10.0
         w_uncertain = 2.0
 
@@ -176,7 +174,7 @@ class DEMBuilder:
         )
 
         # unobserved cells get a high default cost
-        cost = np.where(np.isfinite(cost), cost, 20.0) 
+        cost = np.where(np.isfinite(cost), cost, 50.0) 
         cost[~self.observed] = 10.0
 
         return cost

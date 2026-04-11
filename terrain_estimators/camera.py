@@ -1,10 +1,12 @@
 import numpy as np
 from typing import Tuple, Callable
-from numba import cuda
+from numba import cuda, njit
 
 from terrain_estimators.estimator_kernels import (
     ray_to_terrain_kernel
 )
+
+from terrain_estimators.traversability_BCM import _compute_attribute_vector
 
 class Camera:
     def __init__(self, focal_length: float, sensor_size: Tuple[float, float], image_size: Tuple[int, int],
@@ -127,7 +129,7 @@ class Camera:
     def get_point_cloud(self, robot_position: np.ndarray, robot_heading: float, 
                         d_heightmap,
                         heightmap_origin: np.ndarray, heightmap_cell_size: float,
-                        noise_sigma: float = 0.5) -> dict:
+                        noise_sigma: float = 0.2) -> dict:
         
         pixels = self.generate_pixel_grid()
         rays = self.pixel_to_rays(pixels)
@@ -169,6 +171,39 @@ class Camera:
 
         return {
             'points': noisy_points,
+            'depths': depths,
             'sigma': uncertainty['sigma'],
             'patch_size': uncertainty['patch_size']
         }
+    
+    def classify_point_cloud(self, point_cloud: dict, classifier, cell_size: float) -> np.ndarray:
+        points = point_cloud['points']
+        depths = point_cloud['depths']
+
+        xmin, ymin = points[:, 0].min(), points[:, 1].min()
+        n_cols = max(1, int(np.ceil((points[:, 0].max() - xmin) / cell_size)))
+        n_rows = max(1, int(np.ceil((points[:, 1].max() - ymin) / cell_size)))
+
+        col_idx = np.clip((points[:, 0] - xmin) / cell_size, 0, n_cols - 1).astype(int)
+        row_idx = np.clip((points[:, 1] - ymin) / cell_size, 0, n_rows - 1).astype(int)
+        cell_ids = row_idx * n_cols + col_idx
+
+        unique_cells = np.unique(cell_ids)
+        scores = np.zeros(unique_cells.shape[0], dtype=np.float32)
+        centers = np.zeros((unique_cells.shape[0], 2), dtype=np.float32)
+
+        for i, cell_id in enumerate(unique_cells):
+            mask = (cell_ids == cell_id)
+            cell_points = points[mask]
+            cell_depths = depths[mask]
+
+            centers[i,0] = cell_points[:, 0].mean()
+            centers[i,1] = cell_points[:, 1].mean()
+
+            mean_depth = np.mean(cell_depths)
+            expected_density = max(1.0, 20.0 * (2.0 / max(mean_depth, 0.1)) ** 2)
+
+            attributes = _compute_attribute_vector(cell_points, cell_points.shape[0], expected_density)
+            scores[i] = classifier.score(attributes)[0]
+        
+        return scores, centers

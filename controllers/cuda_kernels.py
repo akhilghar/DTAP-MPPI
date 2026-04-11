@@ -549,6 +549,15 @@ def get_trav_cost(px, py, trav_cost, origin_x, origin_y, cell_size):
 
     return trav_cost[ix, iy]
 
+@cuda.jit(device=True)
+def sign(x):
+    if x > 0:
+        return 1.0
+    elif x < 0:
+        return -1.0
+    else:
+        return 0.0
+
 @cuda.jit
 def mc_cost_and_min_dist_kernel(
         trajectories, samples, costs, min_dists,
@@ -583,6 +592,7 @@ def mc_cost_and_min_dist_kernel(
             for i in range(control_dim):
                 u = samples[t, idx, i]
                 control_cost += R_diag[i] * u * u
+                control_cost -= sign(u) * 0.4 # Encourage forward motion, discourage backward motion
 
             cost += state_cost + control_cost
 
