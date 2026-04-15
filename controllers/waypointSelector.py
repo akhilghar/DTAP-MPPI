@@ -121,7 +121,7 @@ class WaypointSelector:
 
         self.current_waypoint = waypoint
 
-        print(f"Selected Waypoint: {self.current_waypoint}")
+        # print(f"Selected Waypoint: {self.current_waypoint}")
 
         return self.current_waypoint
 

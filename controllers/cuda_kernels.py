@@ -566,7 +566,9 @@ def mc_cost_and_min_dist_kernel(
         rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
         poly_vertices, poly_starts, poly_lengths, num_polys,
         d_safe, Q_obs, robot_radius,
-        num_samples, horizon, state_dim, control_dim, bounds):
+        num_samples, horizon, state_dim, control_dim, bounds,
+        traversability, trav_rows, trav_cols, 
+        origin_x, origin_y, cell_size):
     """
     Single-pass kernel that computes both MPPI cost and minimum clearance.
 
@@ -639,6 +641,17 @@ def mc_cost_and_min_dist_kernel(
                     d_clr = dist - robot_radius
                     if d_clr < min_d:
                         min_d = d_clr
+
+            grid_r = int((px - origin_x) / cell_size)
+            grid_c = int((py - origin_y) / cell_size)
+
+            if 0 <= grid_r < trav_rows and 0 <= grid_c < trav_cols:
+                trav_score = traversability[grid_r, grid_c]
+                if trav_score > 0.7:
+                    cost += 1000.0  # Impose a very high cost for traversing non-traversable terrain
+                elif trav_score > 0.4:
+                    cost += trav_score*10.0    # Impose a moderate cost for traversing partially traversable terrain
+
             # Boundary cost
             if px < bounds[0] + robot_radius:
                 cost += Q_obs * (bounds[0] + robot_radius - px)

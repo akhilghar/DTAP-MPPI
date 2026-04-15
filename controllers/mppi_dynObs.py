@@ -41,9 +41,6 @@ class MPPIConfig:
     d_safe: float = 0.5   # Safe distance from obstacles
     obs_cost_type: str = 'barrier'
 
-    # Terrain parameters
-    Q_trav: float = 2.0  # Traversability cost weight
-
     # Dynamics parameters
     dynamics_params: np.ndarray = None
 
@@ -81,7 +78,7 @@ class MPPIConfig:
 
 
 class MPPIDynObs:
-    def __init__(self, config: MPPIConfig, dynamics_func: Callable, environment):
+    def __init__(self, config: MPPIConfig, dynamics_func: Callable, environment, dem):
 
         if not hasattr(dynamics_func, 'metadata'):
             raise ValueError("Dynamics function must have metadata for state_dim, control_dim, and params_dim.")
@@ -128,6 +125,8 @@ class MPPIDynObs:
         # RNG states for obs_mc_rollout_kernel — lazily grown as obstacle count changes
         self._obs_rng_states   = None
         self._obs_rng_n_states = 0
+
+        self.dem = dem
 
         self._allocate_gpu_memory()
 
@@ -195,6 +194,8 @@ class MPPIDynObs:
         # ---- Terrain buffers ----
         self.d_terrain = cuda.to_device(self.environment.terrain.astype(np.float32))
         self.d_terrain_info = cuda.to_device(self.terrain_info)
+        self.d_bounds = cuda.to_device(np.array(self.environment.bounds, dtype=np.float32))
+        self.d_traversability = cuda.to_device(self.dem.traversability_overlay.astype(np.float32))
 
         self._last_expected_traj = None
 
@@ -218,7 +219,7 @@ class MPPIDynObs:
         cuda.to_device(self.current_covariance.astype(np.float32), to=self.d_sigma)
         cuda.to_device(self.u_nominal.astype(np.float32),      to=self.d_u_nominal)
 
-        threads = 256
+        threads = 128
         blocks  = (self.config.num_samples + threads - 1) // threads
 
         # ---- Generate samples on GPU (eliminates CPU RNG + 8 MB H2D) ----
@@ -331,7 +332,9 @@ class MPPIDynObs:
             self.config.d_safe, self.config.Q_obs, robot_radius,
             self.config.num_samples, self.config.horizon,
             self.config.state_dim, self.config.control_dim,
-            self.environment.bounds
+            self.d_bounds,
+            self.d_traversability, self.dem.traversability_overlay.shape[0], self.dem.traversability_overlay.shape[1],
+            self.terrain_info[0], self.terrain_info[1], self.terrain_info[2],
         )
         cuda.synchronize()
         t5 = time.perf_counter()

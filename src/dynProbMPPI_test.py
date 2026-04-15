@@ -9,6 +9,7 @@ from dynamics.models import DYNAMICS_REGISTRY
 from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, ObstacleMode
 from terrain_estimators.DEM_builder import DEMBuilder
 from terrain_estimators.camera import Camera
+from terrain_estimators.traversability_BCM import TraversabilityClassifier, _compute_attribute_vector
 
 # ============================================================================
 # Setup Environment
@@ -101,6 +102,27 @@ config = MPPIConfig(
     noise_sigma=noise_mod,
 )
 
+env_origin = (env.bounds[0], env.bounds[2])
+env_cell_size = env.dx
+env_grid_size = (int((env.bounds[1] - env.bounds[0]) / env_cell_size), int((env.bounds[3] - env.bounds[2]) / env_cell_size))
+
+classifier = TraversabilityClassifier(
+    n_classes=3,
+    n_attributes=8,
+    buffer_size=5000,
+    retrain_interval=100,
+    pitch_limit=20.0,
+    roll_limit=20.0,
+    slip_limit=0.5
+)
+
+classifier.heightmap_bootstrap(
+    heightmap=env.terrain,
+    cell_size=env_cell_size,
+    patch_size=3,
+    sample_size=3000
+)
+
 # print(config)
 cam = Camera(
     focal_length=0.02,
@@ -112,22 +134,19 @@ cam = Camera(
     max_range=11.0
 )
 
-env_origin = (env.bounds[0], env.bounds[2])
-env_cell_size = env.dx
-env_grid_size = (int((env.bounds[1] - env.bounds[0]) / env_cell_size), int((env.bounds[3] - env.bounds[2]) / env_cell_size))
 dem = DEMBuilder(origin=env_origin, cell_size=env_cell_size, grid_size=env_grid_size)
 
 waypoint_selector = WaypointSelector(
     grid_resolution=0.5,
     grid_half_size=6,
-    goal_weight=10.0,
-    obstacle_weight=15.0,
+    goal_weight=25.0,
+    obstacle_weight=50.0,
     terrain_weight=5.0,
     heading_weight=1.0,
     d_safe=config.d_safe
 )
 
-mppi = MPPIDynObs(config, model.gpu, environment=env)
+mppi = MPPIDynObs(config, model.gpu, environment=env, dem=dem)
 
 # ============================================================================
 # Simulation
@@ -168,6 +187,52 @@ for step in range(num_steps):
             noise_sigma=0.1
         )
         dem.fuse_point_cloud(point_cloud)
+
+        # classify point cloud
+        scores, centers = cam.classify_point_cloud(
+            point_cloud=point_cloud,
+            classifier=classifier,
+            cell_size=env_cell_size
+        )
+
+        # Add classification costs to DEM cost grid
+        for i in range(len(centers)):
+            r,c = dem.world_to_grid(centers[i])
+            if dem.point_in_bounds(r,c):
+                dem.traversability_overlay[r, c] = scores[i]  # weight for traversability cost
+
+    # Online Learning for Classifier
+    r,c = dem.world_to_grid(x[:2])
+    patch_radius = 3
+    if (r >= patch_radius and r < dem.grid_size[0] - patch_radius and
+        c >= patch_radius and c < dem.grid_size[1] - patch_radius):
+        # Perform online learning update here
+        local_observations = dem.observed[r-patch_radius:r+patch_radius+1, c-patch_radius:c+patch_radius+1]
+        if np.mean(local_observations) > 0.5:
+            patch = dem.elevation[r-patch_radius:r+patch_radius+1, c-patch_radius:c+patch_radius+1]
+            patch_r, patch_c = patch.shape
+            points = np.zeros((patch_r*patch_c, 3), dtype=np.float32)
+
+            idx = 0
+            for i in range(patch_r):
+                for j in range(patch_c):
+                    points[idx] = np.array([
+                        (c - patch_radius + j) * dem.cell_size + dem.origin[0],
+                        (r - patch_radius + i) * dem.cell_size + dem.origin[1],
+                        patch[i, j]
+                    ])
+                    idx += 1
+            
+            attr = _compute_attribute_vector(points, len(points), float(len(points)))
+
+            v_cmd = x[3] if state_dim == 5 else 0.5*controls[-1][0] + 0.5*controls[-1][1]
+            classifier.record_experience(
+                attributes=attr,
+                pitch=x[3] if state_dim == 5 else 0.0,
+                roll=x[4] if state_dim == 5 else 0.0,
+                desired_vel=v_cmd,
+                actual_vel=v_cmd,
+            )
 
     # --- Waypoint Selection ---
     obs_positions = np.array([obs.position for obs in env.obstacles])
@@ -486,7 +551,8 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
                             cam_mounting_height=0.3, cam_mounting_angle_deg=5.0,
                             cam_hfov_deg=90.0, cam_vfov_deg=73.74,
                             img_w=320, img_h=240, max_range=11.0, upsample=8,
-                            point_radius=2, goal_pos=None):
+                            point_radius=20*env.dx, goal_pos=None,
+                            trav_overlay=None, trav_observed=None):
     # --- Upsample terrain for smoother rendering ---
     terrain_r = _nd_zoom(terrain.astype(np.float32), upsample, order=1)
 
@@ -530,6 +596,11 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
     ys = np.linspace(ymin, ymax, ny_r)
     Xg, Yg = np.meshgrid(xs, ys, indexing='ij')
 
+    # Original-grid indices for each upsampled point (for traversability lookup)
+    nx_orig, ny_orig = terrain.shape
+    orig_ix_all = np.clip(np.floor((Xg.ravel() - xmin) / env_cell_size).astype(int), 0, nx_orig - 1)
+    orig_iy_all = np.clip(np.floor((Yg.ravel() - ymin) / env_cell_size).astype(int), 0, ny_orig - 1)
+
     dxv = Xg.ravel() - cam_pos[0]
     dyv = Yg.ravel() - cam_pos[1]
     dzv = terrain_r.ravel() - cam_pos[2]
@@ -543,33 +614,62 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
     valid = (depth > 0.05) & (depth <= max_range)
     depth_v = depth[valid];  r_v = r_comp[valid]
     u_v     = u_comp[valid]; elev_v = terrain_r.ravel()[valid]
+    orig_ix_v = orig_ix_all[valid]
+    orig_iy_v = orig_iy_all[valid]
 
     # Normalised device coordinates: [-1, +1]
     u_ndc = r_v / (depth_v * half_w)   # -1=left,  +1=right
     v_ndc = u_v / (depth_v * half_h)   # -1=below, +1=above
 
     in_fov = (np.abs(u_ndc) <= 1.0) & (np.abs(v_ndc) <= 1.0)
-    depth_v = depth_v[in_fov]; u_ndc  = u_ndc[in_fov]
-    v_ndc   = v_ndc[in_fov];   elev_v = elev_v[in_fov]
+    depth_v   = depth_v[in_fov];   u_ndc     = u_ndc[in_fov]
+    v_ndc     = v_ndc[in_fov];     elev_v    = elev_v[in_fov]
+    orig_ix_v = orig_ix_v[in_fov]; orig_iy_v = orig_iy_v[in_fov]
 
     # Raster coordinates
     col = np.clip(((u_ndc + 1.0) / 2.0 * (img_w - 1)).astype(int), 0, img_w - 1)
     row = np.clip(((1.0 - (v_ndc + 1.0) / 2.0) * (img_h - 1)).astype(int), 0, img_h - 1)
 
     # Far-to-near sort → near points overwrite far ones via numpy assignment
-    order   = np.argsort(depth_v)[::-1]
-    col     = col[order];     row     = row[order]
-    depth_v = depth_v[order]; elev_v  = elev_v[order]
+    order     = np.argsort(depth_v)[::-1]
+    col       = col[order];       row       = row[order]
+    depth_v   = depth_v[order];   elev_v    = elev_v[order]
+    orig_ix_v = orig_ix_v[order]; orig_iy_v = orig_iy_v[order]
 
-    # --- Colour: elevation mapped through 'terrain' cmap + depth fog ---
-    t_min, t_max = terrain.min(), terrain.max()
-    norm_e = np.clip((elev_v - t_min) / (t_max - t_min + 1e-8), 0, 1)
-    cmap   = plt.get_cmap('terrain')
-    rgb    = (cmap(norm_e)[:, :3] * 255).astype(np.float32)
-
+    # --- Colour: traversability tri-color (green/yellow/red) + depth fog ---
     fog     = np.clip(depth_v / max_range, 0, 1)[:, np.newaxis]
     fog_col = np.array([[155, 165, 175]], dtype=np.float32)
-    rgb     = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
+
+    if trav_overlay is not None and trav_observed is not None:
+        scores = trav_overlay[orig_ix_v, orig_iy_v]
+        obs    = trav_observed[orig_ix_v, orig_iy_v]
+        rgb    = np.zeros((len(scores), 3), dtype=np.float32)
+
+        # Unobserved cells → gray
+        rgb[~obs] = [140.0, 140.0, 140.0]
+
+        # Green (0,200,0) → Yellow (255,220,0)  for score in [0, 0.5]
+        low = obs & (scores <= 0.5)
+        t_low = scores[low] * 2.0
+        rgb[low, 0] = t_low * 255.0
+        rgb[low, 1] = 200.0 - t_low * (200.0 - 220.0)   # 200 → 220
+        rgb[low, 2] = 0.0
+
+        # Yellow (255,220,0) → Red (255,0,0)  for score in (0.5, 1.0]
+        high = obs & (scores > 0.5)
+        t_high = (scores[high] - 0.5) * 2.0
+        rgb[high, 0] = 255.0
+        rgb[high, 1] = (1.0 - t_high) * 220.0
+        rgb[high, 2] = 0.0
+
+        rgb = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
+    else:
+        # Fallback: elevation colormap
+        t_min, t_max = terrain.min(), terrain.max()
+        norm_e = np.clip((elev_v - t_min) / (t_max - t_min + 1e-8), 0, 1)
+        cmap   = plt.get_cmap('terrain')
+        rgb    = (cmap(norm_e)[:, :3] * 255).astype(np.float32)
+        rgb    = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
 
     # --- Sky gradient background ---
     img     = np.zeros((img_h, img_w, 3), dtype=np.uint8)
@@ -642,6 +742,8 @@ for i, state in enumerate(trajectory):
         upsample=8,
         point_radius=2,
         goal_pos=x_goal[:2],
+        trav_overlay=dem.traversability_overlay,
+        trav_observed=dem.observed,
     )
 
     # HUD overlay

@@ -299,7 +299,7 @@ class TraversabilityClassifier:
         log_probs = np.zeros((n, self.n_classes), dtype=np.float32)
 
         for c in range(self.n_classes):
-            # Use log likelihood for numerical stability
+            # Use log likelihood for numerical stability - log likelihood is derived from log of Gaussian PDF
             diff = attributes - self.class_means[c]
             log_likelihood = -0.5 * np.sum((diff**2)/self.class_vars[c] + np.log(2*np.pi*self.class_vars[c]), axis=1)
             log_posterior = log_likelihood + np.log(self.class_priors[c])

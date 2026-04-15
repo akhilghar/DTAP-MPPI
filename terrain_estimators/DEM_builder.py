@@ -98,6 +98,9 @@ class DEMBuilder:
         # track which cells have ever been observed
         self.observed = np.zeros(grid_size, dtype=bool)
 
+        # Traversability cost
+        self.traversability_overlay = np.full(grid_size, 0.0, dtype=np.float32)
+
     def world_to_grid(self, points_xy: np.ndarray) -> np.ndarray:
         grid_coords = (points_xy - self.origin) / self.cell_size
         return np.floor(grid_coords).astype(int)
@@ -109,6 +112,9 @@ class DEMBuilder:
             (grid_indices[:, 1] >= 0) &
             (grid_indices[:, 1] < self.grid_size[1])
         )
+    
+    def point_in_bounds(self, row: int, col: int) -> bool:
+        return 0 <= row < self.grid_size[0] and 0 <= col < self.grid_size[1]
 
     def compute_patch_cells(self, point_xy: np.ndarray, patch_size: float) -> np.ndarray:
         half = patch_size / 2.0
@@ -183,5 +189,9 @@ class DEMBuilder:
         grid_coords = self.world_to_grid(points_xy)
         rows = np.clip(np.floor(grid_coords[:, 1]).astype(int), 0, self.grid_size[0] - 1)
         cols = np.clip(np.floor(grid_coords[:, 0]).astype(int), 0, self.grid_size[1] - 1)
-        cost = self.get_traversability_cost()
-        return cost[rows, cols]
+        cost_grid = self.get_traversability_cost()
+        trrn_cost = cost_grid[rows, cols]
+
+        classification_cost = self.traversability_overlay[rows, cols]*50.0
+        total_cost = trrn_cost + classification_cost
+        return total_cost
