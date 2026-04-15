@@ -400,12 +400,8 @@ class ProbabilisticEnv:
         terrain_goalpos_x = int((10.0-xmin) / self.dx) # Change this if the goal is not at (10,10)
         terrain_goalpos_y = int((10.0-ymin) / self.dy) # Change this if the goal is not at (10,10)
 
-        self.terrain = 0.3*np.linalg.norm(np.array([self.dx, self.dy]))*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
-        if self.dx > 0.5:  # Only clear a flat area for visualization if the terrain is coarse enough to be visually distracting
-            self.terrain[max(0, terrain_startpos_x-int(2/self.dx)):terrain_startpos_x+int(2/self.dx), max(0, terrain_startpos_y-int(2/self.dy)):terrain_startpos_y+int(2/self.dy)] = 0.0  # Clear a flat area around the origin for better visualization
+        self.terrain = 0.5*np.linalg.norm(np.array([self.dx, self.dy]))*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
 
-        # Prevent goal from being on a steep slope by clearing a flat area around the goal as well
-        # self.terrain[max(0, terrain_goalpos_x-int(1/self.dx)):min(terrain_goalpos_x+int(1/self.dx), terrain_size_x), max(0, terrain_goalpos_y-int(1/self.dy)):min(terrain_goalpos_y+int(1/self.dy), terrain_size_y)] = 0.0
 
     def get_visualization_data(self) -> dict:
         return {
@@ -415,6 +411,34 @@ class ProbabilisticEnv:
                 for obs in self.obstacles
             ],
         }
+    
+    def get_static_obstacle_costmap(self, grid_size: Tuple[int, int], cell_size: float,
+                                     origin: Tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
+        costmap = np.zeros(grid_size, dtype=np.float32)
+        origin_x, origin_y = origin
+
+        for obs in self.obstacles:
+            if obs.mode == ObstacleMode.STATIC:
+                # Compute the grid cells that fall within the obstacle's radius
+                obs_x, obs_y = obs.position
+                obs_r = obs.radius
+
+                # Determine the bounding box of the obstacle in grid coordinates
+                # (offset by origin so cell indices match the grid's coordinate frame)
+                x_min = int(max(0, (obs_x - obs_r - origin_x) / cell_size))
+                x_max = int(min(grid_size[0] - 1, (obs_x + obs_r - origin_x) / cell_size))
+                y_min = int(max(0, (obs_y - obs_r - origin_y) / cell_size))
+                y_max = int(min(grid_size[1] - 1, (obs_y + obs_r - origin_y) / cell_size))
+
+                for x in range(x_min, x_max + 1):
+                    for y in range(y_min, y_max + 1):
+                        cell_center_x = origin_x + x * cell_size + cell_size / 2.0
+                        cell_center_y = origin_y + y * cell_size + cell_size / 2.0
+                        dist_to_obs = np.linalg.norm(np.array([cell_center_x - obs_x, cell_center_y - obs_y]))
+                        if dist_to_obs <= obs_r:
+                            costmap[x, y] = 100.0  # Mark as occupied
+
+        return costmap
 
     def step(self, dt: float, robot_pos: Optional[np.ndarray] = None) -> None:
         self.move_obstacles(dt, robot_pos=robot_pos)

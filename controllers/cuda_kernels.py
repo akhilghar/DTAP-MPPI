@@ -5,8 +5,6 @@ from numba.cuda.random import float32, xoroshiro128p_uniform_float32, xoroshiro1
 import numpy as np
 import math
 
-MAX_TERRAIN_POINTS = 256  # Must match MPPIConfig.n_terrain_points; used for shared memory allocation
-
 # Rollout kernel for MPPI, dynamically generated based on the provided dynamics function
 def make_rollout_kernel(dynamics_func, state_dim, control_dim):
     
@@ -407,7 +405,7 @@ def generate_samples_kernel(rng_states, samples, u_nominal, sigma, u_min, u_max,
                     u = u_max[d]
                 samples[t, idx, d] = u
 
-# Terrain Awareness CUDA Kernels
+"""# Terrain Awareness CUDA Kernels
 @cuda.jit
 def sample_terrain_kernel(rng_states, ground_truth, terrain_xy, terrain_elev,
                           px, py, theta, sensor_offset, sensor_radius, n_points, 
@@ -532,20 +530,45 @@ def sample_slope_kernel(terrain_xy, terrain_elev, n_points, cx, cy, out):
     if tid == 0:
         out[0] = z_est
         out[1] = 2.0 * sh_sx[0] / W  # Slope in x direction
-        out[2] = 2.0 * sh_sy[0] / W  # Slope in y direction
+        out[2] = 2.0 * sh_sy[0] / W  # Slope in y direction"""
+
+@cuda.jit(device=True)
+def get_trav_cost(px, py, trav_cost, origin_x, origin_y, cell_size):
+    # Compute the traversal cost at position (px, py) by looking up the corresponding cell in the trav_cost grid
+    gx = (px - origin_x) / cell_size
+    gy = (py - origin_y) / cell_size
+
+    ix = int(gx)
+    iy = int(gy)
+
+    # Clamp indices to be within bounds
+    nx = trav_cost.shape[0]
+    ny = trav_cost.shape[1]
+    ix = max(0, min(nx - 1, ix))
+    iy = max(0, min(ny - 1, iy))
+
+    return trav_cost[ix, iy]
+
+@cuda.jit(device=True)
+def sign(x):
+    if x > 0:
+        return 1.0
+    elif x < 0:
+        return -1.0
+    else:
+        return 0.0
 
 @cuda.jit
 def mc_cost_and_min_dist_kernel(
         trajectories, samples, costs, min_dists,
-        x_goal, Q_diag, R_diag, Qf_diag,
+        x0, x_goal, Q_diag, R_diag, Qf_diag,
         circle_pred, circle_radii, num_circles, num_obs_rollouts,
         rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
         poly_vertices, poly_starts, poly_lengths, num_polys,
         d_safe, Q_obs, robot_radius,
         num_samples, horizon, state_dim, control_dim, bounds,
-        sensed_slope,
-        sensed_cx, sensed_cy, sensed_radius,
-        Q_slope, Q_elev, pz):
+        traversability, trav_rows, trav_cols, 
+        origin_x, origin_y, cell_size):
     """
     Single-pass kernel that computes both MPPI cost and minimum clearance.
 
@@ -564,19 +587,19 @@ def mc_cost_and_min_dist_kernel(
         for t in range(horizon):
             state_cost = 0.0
             for i in range(state_dim):
-                diff = trajectories[idx, t, i] - x_goal[i]
-                state_cost += Q_diag[i] * diff * diff
+                diff_goal = trajectories[idx, t, i] - x_goal[i]
+                state_cost += Q_diag[i] * diff_goal * diff_goal
 
             control_cost = 0.0
             for i in range(control_dim):
                 u = samples[t, idx, i]
                 control_cost += R_diag[i] * u * u
+                control_cost -= sign(u) * 0.4 # Encourage forward motion, discourage backward motion
 
             cost += state_cost + control_cost
 
             px = trajectories[idx, t, 0]
             py = trajectories[idx, t, 1]
-            theta = trajectories[idx, t, 2]
 
             # MC circle cost (average over rollouts) + worst-case min_dist
             obs_cost = 0.0
@@ -585,7 +608,7 @@ def mc_cost_and_min_dist_kernel(
                     obs_px = circle_pred[r, c, t, 0]
                     obs_py = circle_pred[r, c, t, 1]
                     dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
-                    if dist < d_safe:
+                    if dist < d_safe + 0.25:
                         obs_cost += Q_obs * (d_safe - dist + robot_radius)
                     if dist < min_d:
                         min_d = dist
@@ -619,6 +642,16 @@ def mc_cost_and_min_dist_kernel(
                     if d_clr < min_d:
                         min_d = d_clr
 
+            grid_r = int((px - origin_x) / cell_size)
+            grid_c = int((py - origin_y) / cell_size)
+
+            if 0 <= grid_r < trav_rows and 0 <= grid_c < trav_cols:
+                trav_score = traversability[grid_r, grid_c]
+                if trav_score > 0.7:
+                    cost += 1000.0  # Impose a very high cost for traversing non-traversable terrain
+                elif trav_score > 0.4:
+                    cost += trav_score*10.0    # Impose a moderate cost for traversing partially traversable terrain
+
             # Boundary cost
             if px < bounds[0] + robot_radius:
                 cost += Q_obs * (bounds[0] + robot_radius - px)
@@ -632,23 +665,6 @@ def mc_cost_and_min_dist_kernel(
             # Goal reward
             if math.sqrt((px - x_goal[0]) ** 2 + (py - x_goal[1]) ** 2) < robot_radius:
                 cost -= 100.0  # Reward for being within goal radius
-
-            # Terrain cost - only add if within sensed region to avoid penalizing trajectories for unknown terrain
-            d2x = px - sensed_cx
-            d2y = py - sensed_cy
-            if d2x * d2x + d2y * d2y < sensed_radius * sensed_radius:
-                # Sample slope and elevation from sensed terrain
-                z_est, slope_x, slope_y = sensed_slope
-                slope_cost = Q_slope * (slope_x*slope_x + slope_y*slope_y) / horizon
-                elev_cost  = Q_elev * math.fabs(z_est - pz) / horizon
-                cost += slope_cost + elev_cost
-
-                rx = -math.sin(theta)
-                ry = math.cos(theta)
-                roll_slope = slope_x * rx + slope_y * ry
-                ROLL_SLOPE_MAX = 0.3 # Approximately sin(17 degrees), chosen based on typical robot capabilities and safety margins
-                if roll_slope > ROLL_SLOPE_MAX:  # Threshold for excessive slope
-                    cost += 0.9 * Q_obs * (roll_slope - ROLL_SLOPE_MAX)  # Penalize excessive slope in the direction of roll
 
         # Terminal cost
         terminal_cost = 0.0
