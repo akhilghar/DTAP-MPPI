@@ -1,12 +1,44 @@
 import numpy as np
 from typing import Tuple, Callable
 from numba import cuda, njit
-
-from terrain_estimators.estimator_kernels import (
-    ray_to_terrain_kernel
-)
-
+from terrain_estimators.estimator_kernels import ray_to_terrain_kernel
 from terrain_estimators.traversability_BCM import _compute_attribute_vector
+
+@njit
+def _batch_attribute_vectors(sorted_pts, sorted_dep, boundaries, n_cells):
+    attr_matrix = np.zeros((n_cells, 8), dtype=np.float32)
+    for i in range(n_cells):
+        start = boundaries[i]
+        end   = boundaries[i + 1]
+        n_pts = end - start
+        if n_pts == 0:
+            continue
+        cell_pts = sorted_pts[start:end]
+        mean_dep  = 0.0
+        for k in range(n_pts):
+            mean_dep += sorted_dep[start + k]
+        mean_dep /= n_pts
+        expected_density = max(1.0, 20.0 * (2.0 / max(mean_dep, 0.1)) ** 2)
+        attr_matrix[i] = _compute_attribute_vector(cell_pts, n_pts, expected_density)
+    return attr_matrix
+
+@njit
+def _batch_centers(sorted_pts, boundaries, n_cells):
+    centers = np.zeros((n_cells, 2), dtype=np.float32)
+    for i in range(n_cells):
+        start = boundaries[i]
+        end   = boundaries[i + 1]
+        if end == start:
+            continue
+        sx = 0.0; sy = 0.0
+        for k in range(start, end):
+            sx += sorted_pts[k, 0]
+            sy += sorted_pts[k, 1]
+        n = end - start
+        centers[i, 0] = sx / n
+        centers[i, 1] = sy / n
+    return centers
+
 
 class Camera:
     def __init__(self, focal_length: float, sensor_size: Tuple[float, float], image_size: Tuple[int, int],
@@ -188,22 +220,21 @@ class Camera:
         row_idx = np.clip((points[:, 1] - ymin) / cell_size, 0, n_rows - 1).astype(int)
         cell_ids = row_idx * n_cols + col_idx
 
-        unique_cells = np.unique(cell_ids)
-        scores = np.zeros(unique_cells.shape[0], dtype=np.float32)
-        centers = np.zeros((unique_cells.shape[0], 2), dtype=np.float32)
+        unique_cells, inverse = np.unique(cell_ids, return_inverse=True)
+        n_cells = len(unique_cells)
 
-        for i, cell_id in enumerate(unique_cells):
-            mask = (cell_ids == cell_id)
-            cell_points = points[mask]
-            cell_depths = depths[mask]
+        # Sort points by cell so each cell's points are contiguous
+        sort_idx = np.argsort(inverse, kind='stable')
+        sorted_inv = inverse[sort_idx]
+        sorted_pts = points[sort_idx]
+        sorted_dep = depths[sort_idx]
 
-            centers[i,0] = cell_points[:, 0].mean()
-            centers[i,1] = cell_points[:, 1].mean()
+        # Cell boundaries in the sorted array
+        boundaries = np.searchsorted(sorted_inv, np.arange(n_cells + 1))
 
-            mean_depth = np.mean(cell_depths)
-            expected_density = max(1.0, 20.0 * (2.0 / max(mean_depth, 0.1)) ** 2)
+        # Build per-cell attribute matrix and centers in one vectorized pass
+        attr_matrix = _batch_attribute_vectors(sorted_pts, sorted_dep, boundaries, n_cells)
+        centers = _batch_centers(sorted_pts, boundaries, n_cells)
 
-            attributes = _compute_attribute_vector(cell_points, cell_points.shape[0], expected_density)
-            scores[i] = classifier.score(attributes)[0]
-        
-        return scores, centers
+        scores = classifier.score(attr_matrix).ravel()
+        return scores.astype(np.float32), centers

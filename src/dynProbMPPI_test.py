@@ -177,6 +177,8 @@ for step in range(num_steps):
         np.array([obs.position.copy() for obs in env.obstacles])
     )
 
+    _t0 = time.perf_counter()
+
     if step % perception_interval == 0:
         point_cloud = cam.get_point_cloud(
             robot_position=x[:2],
@@ -186,20 +188,28 @@ for step in range(num_steps):
             heightmap_cell_size=env_cell_size,
             noise_sigma=0.1
         )
+        _t_pcl = time.perf_counter()
         dem.fuse_point_cloud(point_cloud)
+        _t_fuse = time.perf_counter()
 
         # classify point cloud
+        classify_cell_size = 0.5
         scores, centers = cam.classify_point_cloud(
             point_cloud=point_cloud,
             classifier=classifier,
-            cell_size=env_cell_size
+            cell_size=classify_cell_size
         )
+        _t_classify = time.perf_counter()
 
         # Add classification costs to DEM cost grid
         for i in range(len(centers)):
             r,c = dem.world_to_grid(centers[i])
             if dem.point_in_bounds(r,c):
                 dem.traversability_overlay[r, c] = scores[i]  # weight for traversability cost
+
+        if step % 20 == 0:
+            print(f"  [perception] pcl={1e3*(_t_pcl-_t0):.1f}ms  fuse={1e3*(_t_fuse-_t_pcl):.1f}ms  "
+                  f"classify={1e3*(_t_classify-_t_fuse):.1f}ms ({len(centers)} cells)")
 
     # Online Learning for Classifier
     r,c = dem.world_to_grid(x[:2])
@@ -233,6 +243,7 @@ for step in range(num_steps):
                 desired_vel=v_cmd,
                 actual_vel=v_cmd,
             )
+    _t_online = time.perf_counter()
 
     # --- Waypoint Selection ---
     obs_positions = np.array([obs.position for obs in env.obstacles])
@@ -250,9 +261,9 @@ for step in range(num_steps):
             obs_radii=obs_radii,
             terrain_cost_fn=dem.get_cost_at_points
         )
+    _t_wp = time.perf_counter()
 
     subgoal_log.append(subgoal)
-
     mppi_target = x_goal.copy()
     mppi_target[:2] = subgoal
 
@@ -290,13 +301,12 @@ for step in range(num_steps):
 
     if step % 20 == 0:
         rollout_snapshots[step] = mppi.get_rollout_snapshot(n=50)
+        _t_mppi = end - start
         print(f"Step {step}: pos=({x[0]:.2f},{x[1]:.2f}), "
               f"Subgoal=({subgoal[0]:.2f},{subgoal[1]:.2f}), "
               f"position_error={np.linalg.norm(x[:2]-x_goal[:2]):.2f}, "
-              f"orientation=({x[3]*180/np.pi:.1f}deg, {x[4]*180/np.pi:.2f}deg), "
-              f"covariance={cov}, "
               f"safe={is_safe}, "
-              f"time per step={end-start:.3f}s")
+              f"online={1e3*(_t_online-_t0):.1f}ms  wp={1e3*(_t_wp-_t_online):.1f}ms  mppi={1e3*_t_mppi:.1f}ms")
         
     if step % 50 == 0 & step > 0:
         recent_disp = np.linalg.norm(trajectory[-1][:2] - trajectory[-50][:2])
@@ -521,7 +531,7 @@ X, Y = np.meshgrid(x_coords, y_coords, indexing='ij')
 fig = plt.figure(figsize=(12, 10))
 ax1 = fig.add_subplot(2, 2, 1, projection='3d')
 ax1.set_title("Sensed Terrain Elevation")
-ax1.plot_surface(X, Y, dem.elevation.T, cmap="terrain", alpha=0.75)
+ax1.plot_surface(X, Y, dem.elevation, cmap="terrain", alpha=0.75)
 ax1.set_zlim(np.min(env.terrain)-1, np.max(env.terrain)+7)
 ax2 = fig.add_subplot(2, 2, 2)
 ax2.set_title("Sensed Terrain Square Error")

@@ -424,7 +424,7 @@ class MPPIDynObs:
         cuda.synchronize()
         t6 = time.perf_counter()
         # print(f"MPPI solve timings (s): sample_gen={1000*(t1-t0):.1f}ms, "
-        #      f"obs_rollout={1000*(t2-t1):.1f}ms, rollout={1000*(t3-t2):.1f}ms, terrain_sample={1000*(t4-t3):.1f}ms, cost={1000*(t5-t4):.1f}ms, cpu={1000*(t6-t5):.1f}ms")
+        #      f"obs_rollout={1000*(t2-t1):.1f}ms, rollout={1000*(t3-t2):.1f}ms, cost={1000*(t5-t3):.1f}ms, cpu={1000*(t6-t5):.1f}ms")
 
         if return_trajectory:
             return u_opt, trajectory, is_safe
