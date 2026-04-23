@@ -89,7 +89,7 @@ class MPPIBaseline:
         print(f"CUDA devices: {cuda.gpus}")
 
         print(f"Compiling Rollout Kernel for dynamics: {metadata['name']}...")
-        self.rollout_kernel = make_rollout_kernel_coalesced(
+        self.rollout_kernel = make_rollout_kernel(
             dynamics_func, config.state_dim, config.control_dim
         )
 

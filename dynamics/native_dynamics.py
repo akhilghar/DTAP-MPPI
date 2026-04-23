@@ -100,6 +100,22 @@ def differential_drive_host(x, u, dt, params, terrain, terrain_info):
     
     return np.array([px_next, py_next, theta_next, pitch_next, roll_next], dtype=np.float32)
 
+@dynamics_metadata(state_dim=3, control_dim=2, params_dim=1, description="Differential Drive Dynamics - No Terrain Slope (host)")
+def differential_drive_noslope_host(x, u, dt, params, x_next=None):
+    # Unpack state and control
+    px, py, theta = x
+    vr, vl = u
+    L = params[0]  # Wheelbase
+
+    v = (vr + vl) / 2.0
+    omega = (vr - vl) / L
+
+    # Compute next state using differential drive kinematics
+    px_next = px + v * math.cos(theta) * dt
+    py_next = py + v * math.sin(theta) * dt
+    theta_next = theta + omega * dt
+    
+    return np.array([px_next, py_next, theta_next], dtype=np.float32)
 
 @dynamics_metadata(state_dim=4, control_dim=2, params_dim=1, description="Bicycle Dynamics (host)")
 def bicycle_dynamics_host(x, u, dt, params, x_next=None):

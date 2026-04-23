@@ -11,7 +11,7 @@ from environments.dynamicEnv_deterministic import DeterministicEnv, Obstacle
 # Setup Environment
 # ============================================================================
 corridor_width = 4.0
-env = DeterministicEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.2)
+env = DeterministicEnv(bounds=(-2, 12, -2, 12), robot_radius=0.3)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
@@ -36,44 +36,45 @@ control_dim = model_md["control_dim"]
 
 print("State Dimensions: ", state_dim)
 
-max_deg = 60.0
+max_deg = 75.0
 if state_dim == 4:
-    Q_mod=np.diag([10.0, 10.0, 2.0, 2.0])
-    Qf_mod=np.diag([50.0, 50.0, 10.0, 10.0])
+    Q_mod=np.diag([10.0, 10.0, 2.0, 10.0])
+    Qf_mod=np.diag([50.0, 50.0, 10.0, 50.0])
+    R_mod = np.diag([0.1, 0.1])
     umin_mod = np.array([-2.0, -max_deg*np.pi/180])
     umax_mod = np.array([2.0, max_deg*np.pi/180])
-    noise_mod = np.array([0.55, 0.175])
+    noise_mod = np.array([0.55, 0.15])
     ctrl_label_1 = "Acceleration"
     ctrl_label_2 = "Steering Angle"
     x0 = np.array([0.0, 0.0, np.pi/2, 0.0])
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([7.0, 7.0, 2.0])
-    Qf_mod=np.diag([40.0, 40.0, 5.0])
-    umin_mod = np.array([-4.0, -4.0])
-    umax_mod = np.array([4.0, 4.0])
-    noise_mod = np.array([0.6, 0.6])
+    Q_mod=np.diag([1.0, 1.0, 0.5, 1.0, 2.0])
+    Qf_mod=np.diag([40.0, 40.0, 0.5, 10.0, 10.0])
+    R_mod = np.eye(control_dim)
+    umin_mod = np.array([-3.0, -3.0])
+    umax_mod = np.array([3.0, 3.0])
+    noise_mod = np.array([0.65, 0.65])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([0.0, 0.0, np.pi/2])
-    x_goal = np.array([0.0, 20.0, np.pi/2])
-
+    x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])
 
 config = MPPIConfig(
     num_samples=20000,
-    horizon=50,
+    horizon=40,
     dt=0.05,
-    lambda_=10.0, # increase temperature for smoother trajectory
+    lambda_=30.0, # increase temperature for smoother trajectory
 
     Q=Q_mod,
     Qf=Qf_mod,
-    R=np.diag([0.1, 0.1]),
+    R=R_mod,
 
-    Q_obs=250.0,
+    Q_obs=190.0,
     d_safe=env.robot_radius + 0.1,
 
-    dynamics_params=np.array([1.0]),
+    dynamics_params=np.array([2*env.robot_radius, 0.1]),
 
     u_min=umin_mod,
     u_max=umax_mod,
@@ -83,7 +84,7 @@ config = MPPIConfig(
 
 # print(config)
 
-mppi = MPPIDynObs(config, model.gpu, environment=env)
+mppi = MPPIDynObs(config, model.gpu, environment=env, dem=None)
 
 # ============================================================================
 # Simulation

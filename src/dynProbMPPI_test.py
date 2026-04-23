@@ -655,22 +655,29 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
         obs    = trav_observed[orig_ix_v, orig_iy_v]
         rgb    = np.zeros((len(scores), 3), dtype=np.float32)
 
+        # Color thresholds: green below YELLOW_THR, red above RED_THR
+        YELLOW_THR = 0.35
+        RED_THR    = 0.65
+
         # Unobserved cells → gray
         rgb[~obs] = [140.0, 140.0, 140.0]
 
-        # Green (0,200,0) → Yellow (255,220,0)  for score in [0, 0.5]
-        low = obs & (scores <= 0.5)
-        t_low = scores[low] * 2.0
+        # Green (0,200,0) → Yellow (255,220,0)  for score in [0, YELLOW_THR]
+        low = obs & (scores <= YELLOW_THR)
+        t_low = scores[low] / YELLOW_THR
         rgb[low, 0] = t_low * 255.0
-        rgb[low, 1] = 200.0 - t_low * (200.0 - 220.0)   # 200 → 220
+        rgb[low, 1] = 200.0 + t_low * 20.0   # 200 → 220
         rgb[low, 2] = 0.0
 
-        # Yellow (255,220,0) → Red (255,0,0)  for score in (0.5, 1.0]
-        high = obs & (scores > 0.5)
-        t_high = (scores[high] - 0.5) * 2.0
-        rgb[high, 0] = 255.0
-        rgb[high, 1] = (1.0 - t_high) * 220.0
-        rgb[high, 2] = 0.0
+        # Yellow (255,220,0) → Red (255,0,0)  for score in (YELLOW_THR, RED_THR]
+        mid = obs & (scores > YELLOW_THR) & (scores <= RED_THR)
+        t_mid = (scores[mid] - YELLOW_THR) / (RED_THR - YELLOW_THR)
+        rgb[mid, 0] = 255.0
+        rgb[mid, 1] = (1.0 - t_mid) * 220.0
+        rgb[mid, 2] = 0.0
+
+        # Fully red for score > RED_THR
+        rgb[obs & (scores > RED_THR)] = [255.0, 0.0, 0.0]
 
         rgb = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
     else:

@@ -105,6 +105,26 @@ def differential_drive(x, u, dt, params, terrain, terrain_info, x_next):
     x_next[3] = pitch_next
     x_next[4] = roll_next
 
+@dynamics_metadata(state_dim=3, control_dim=2, params_dim=1, description="Differential Drive Dynamics - No Terrain Slope")
+@cuda.jit(device=True)
+def differential_drive_noslope(x, u, dt, params, x_next):
+    # Unpack state and control
+    px, py, theta = x
+    vr, vl = u
+    L = params[0]  # Wheelbase
+
+    v = (vr + vl) / 2.0
+    omega = (vr - vl) / L
+
+    # Compute next state using differential drive kinematics
+    px_next = px + v * math.cos(theta) * dt
+    py_next = py + v * math.sin(theta) * dt
+    theta_next = theta + omega * dt
+    
+    x_next[0] = px_next
+    x_next[1] = py_next
+    x_next[2] = theta_next
+
 @dynamics_metadata(state_dim=4, control_dim=2, params_dim=1, description="Bicycle Dynamics")
 @cuda.jit(device=True)
 def bicycle_dynamics(x, u, dt, params, x_next):

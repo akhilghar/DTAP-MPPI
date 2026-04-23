@@ -5,7 +5,7 @@ from controllers.mppi_baseline import MPPIBaseline, MPPIConfig
 from dynamics.models import DYNAMICS_REGISTRY
 from environments.staticEnv import StaticEnvironment
 # from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, ObstacleMode
-from environments.dynamicEnv_deterministic import DeterministicEnv, Obstacle
+# from environments.dynamicEnv_deterministic import DeterministicEnv, Obstacle
 import time
 import os
 
@@ -15,20 +15,19 @@ import os
 
 # Create environment with obstacles
 corridor_width = 4.0
-env = DeterministicEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.2)
+env = StaticEnvironment(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.2)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
 for i in range(0,8):
-    env.add_obstacle(
-        Obstacle(position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
-                 radius=0.3+0.4*np.random.rand(),
-                 velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0])
+    env.add_circle_obstacle(
+        position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
+        radius=0.3+0.4*np.random.rand()
     )
 
 # Configure MPPI
 
-model_name = "differential_drive"  # "differential_drive", "ackermann", "bicycle"
+model_name = "differential_drive_noslope"  # "differential_drive", "ackermann", "bicycle"
 model = DYNAMICS_REGISTRY[model_name]
 
 model_md = model.metadata
@@ -95,15 +94,11 @@ num_steps = 500
 num_safe = 0
 
 x = x0.copy()
-obstacle_history = []
 goal_reached = 0
 sim_start = time.time()
 
 print("Running MPPI simulation...")
 for step in range(num_steps):
-    # Step environment (update obstacles) and record for visualization
-    env.step(config.dt)
-    obstacle_history.append(np.array([obs.position.copy() for obs in env.obstacles]))
 
     # Get control (returns (u_opt, is_safe))
     start = time.time()
@@ -115,7 +110,7 @@ for step in range(num_steps):
     x_next = model.cpu(x, u, config.dt, config.dynamics_params)
 
     # Check collision against the new state
-    if env.check_for_collision(x_next[:2]):
+    if env.check_collision(x_next[:2]):
         print("FATAL: Robot has been killed by the environment. Terminating simulation.")
         break
 
@@ -140,7 +135,6 @@ for step in range(num_steps):
 
 trajectory = np.array(trajectory)
 controls = np.array(controls)
-obstacle_history = np.array(obstacle_history)
 sim_end = time.time()
 
 print(f"Simulation complete: {len(trajectory)} steps")
@@ -179,9 +173,9 @@ heading_line, = ax.plot([], [], 'k-', linewidth=2)
 
 # Obstacles
 obstacle_patches = []
-for i in range(obstacle_history.shape[1]):
-    circle = Circle(obstacle_history[0, i],
-                    env.obstacles[i].radius,
+for obs in env.obstacles:
+    circle = Circle(obs.position,
+                    obs.radius,
                     color='red')
     ax.add_patch(circle)
     obstacle_patches.append(circle)
@@ -205,16 +199,13 @@ def update(frame):
         [y,y+dy]
     )
 
-    # Update obstacles
-    for i, patch in enumerate(obstacle_patches):
-        patch.center = obstacle_history[frame, i]
     # Return the artists that have been modified (required for blitting)
     return [robot_patch, heading_line] + obstacle_patches
 
 ani = animation.FuncAnimation(
     fig,
     update,
-    frames=max(1, min(len(trajectory), len(obstacle_history))),
+    frames=max(1, len(trajectory)-1),
     interval=config.dt * 1000,  # milliseconds
     blit=True,
 )

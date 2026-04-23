@@ -20,6 +20,12 @@ diffdrive_model = DynamicsModel(
     metadata=differential_drive.metadata
 )
 
+diffdrive_noslope_model = DynamicsModel(
+    gpu=differential_drive_noslope,
+    cpu=differential_drive_noslope_host,
+    metadata=differential_drive_noslope.metadata
+)
+
 ackermann_model = DynamicsModel(
     gpu=ackermann_dynamics,
     cpu=ackermann_dynamics_host,
@@ -29,5 +35,6 @@ ackermann_model = DynamicsModel(
 DYNAMICS_REGISTRY = {
     "bicycle": bicycle_model,
     "differential_drive": diffdrive_model,
+    "differential_drive_noslope": diffdrive_noslope_model,
     "ackermann": ackermann_model
 }

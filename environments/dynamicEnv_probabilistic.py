@@ -400,7 +400,7 @@ class ProbabilisticEnv:
         terrain_goalpos_x = int((10.0-xmin) / self.dx) # Change this if the goal is not at (10,10)
         terrain_goalpos_y = int((10.0-ymin) / self.dy) # Change this if the goal is not at (10,10)
 
-        self.terrain = 0.2*np.linalg.norm(np.array([self.dx, self.dy]))*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
+        self.terrain = 0.25*np.linalg.norm(np.array([self.dx, self.dy]))*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
 
 
     def get_visualization_data(self) -> dict:

@@ -26,7 +26,7 @@ def make_rollout_kernel(dynamics_func, state_dim, control_dim):
 
                 u = cuda.local.array(control_dim, dtype=np.float32)
                 for i in range(control_dim):
-                    u[i] = samples[idx, t, i]
+                    u[i] = samples[t, idx, i]
 
                 x_next = cuda.local.array(state_dim, dtype=np.float32)
 

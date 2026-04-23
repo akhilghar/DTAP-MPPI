@@ -222,7 +222,8 @@ class TraversabilityClassifier:
             self.steps_since_retrain = 0
 
     def heightmap_bootstrap(self, heightmap: np.ndarray, cell_size: float,
-                            patch_size: int, sample_size: int=3000):
+                            patch_size: int, sample_size: int=3000,
+                            noise_sigma: float=0.05):
         rows, cols = heightmap.shape
         rng = np.random.default_rng(42)
 
@@ -240,6 +241,9 @@ class TraversabilityClassifier:
                     points[idx, 1] = (r - patch_size + pr) * cell_size
                     points[idx, 2] = patch_2d[pr, pc]
                     idx += 1
+
+            # Add sensor-like noise so the classifier learns noisy-but-flat = traversable
+            points[:, 2] += rng.normal(0.0, noise_sigma, size=len(points)).astype(np.float32)
 
             attributes = _compute_attribute_vector(
                 points, len(points), float(len(points))
@@ -311,7 +315,7 @@ class TraversabilityClassifier:
         probs /= np.sum(probs, axis=1, keepdims=True)
         return probs
     
-    # Compute a traversability score in [0,1] where higher is more traversable
+    # Compute a traversability score in [0,1] where more is more traversable
     def score(self, attributes: np.ndarray) -> np.ndarray:
         probs = self.predict(attributes)
         # Score is weighted sum of class probabilities (0*traversable + 0.5*cautious + 1*non-traversable)
