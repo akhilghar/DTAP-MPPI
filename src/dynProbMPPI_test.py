@@ -470,7 +470,7 @@ ani = animation.FuncAnimation(
 )
 t_fin = sim_end_time - sim_start_time
 plt.show()
-ani.save(f"./media/GIFs/mppi_animation_{model_name}_{t_fin:.2f}_prob.gif", writer="pillow", fps=1/config.dt)
+ani.save(f"./media/GIFs/BirdsEyeView/mppi_BEV_{model_name}_{t_fin:.2f}_prob.gif", writer="pillow", fps=1/config.dt)
 print("Saved animated GIF of Robot.")
 
 fig, axes = plt.subplots(3, 1, figsize=(14, 12))
@@ -516,7 +516,7 @@ else:
     ax3.grid(True)
 
 plt.tight_layout()
-filename = f'./media/Visualizations/mppi_result_{model_name}_{t_fin:.2f}_dynProb.png'
+filename = f'./media/Visualizations/Physics_Results/mppi_result_{model_name}_{t_fin:.2f}_dynProb.png'
 plt.savefig(filename, dpi=150)
 # plt.show()
 
@@ -528,26 +528,41 @@ x_coords = np.linspace(env.bounds[0], env.bounds[1], nx)
 y_coords = np.linspace(env.bounds[2], env.bounds[3], ny)
 X, Y = np.meshgrid(x_coords, y_coords, indexing='ij')
 
-fig = plt.figure(figsize=(12, 10))
-ax1 = fig.add_subplot(2, 2, 1, projection='3d')
+fig = plt.figure(figsize=(12, 7))
+ax1 = fig.add_subplot(1, 2, 1, projection='3d')
 ax1.set_title("Sensed Terrain Elevation")
 ax1.plot_surface(X, Y, dem.elevation, cmap="terrain", alpha=0.75)
 ax1.set_zlim(np.min(env.terrain)-1, np.max(env.terrain)+7)
-ax2 = fig.add_subplot(2, 2, 2)
-ax2.set_title("Sensed Terrain Square Error")
-im2 = ax2.imshow(np.square(dem.elevation.T-env.terrain.T), extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='viridis', alpha=0.75)
-plt.colorbar(im2, label='Error', ax=ax2)
-ax3 = fig.add_subplot(2, 2, 3, projection='3d')
-ax3.set_title("Ground Truth Terrain")
-ax3.plot_surface(X, Y, env.terrain.T, cmap="terrain", alpha=0.75)
-ax3.set_zlim(np.min(env.terrain)-1, np.max(env.terrain)+7)
-ax4 = fig.add_subplot(2, 2, 4)
-ax4.set_title("Sensed Terrain Confidence")
-im4 = ax4.imshow(dem.confidence.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='plasma', alpha=0.75)
-plt.colorbar(im4, label='Confidence', ax=ax4)
+ax2 = fig.add_subplot(1, 2, 2, projection='3d')
+ax2.set_title("Ground Truth Terrain")
+ax2.plot_surface(X, Y, env.terrain.T, cmap="terrain", alpha=0.75)
+ax2.set_zlim(np.min(env.terrain)-1, np.max(env.terrain)+7)
 plt.tight_layout()
 dem_filename = f'./media/Visualizations/DEM_rendering/observed_dem_{t_fin:.2f}.png'
 plt.savefig(dem_filename, dpi=150)
+
+fig = plt.figure(figsize=(12, 10))
+ax1 = fig.add_subplot(2, 2, 1)
+ax1.set_title("Traversability Overlay")
+im1 = ax1.imshow(dem.traversability_overlay.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='Reds', alpha=0.75)
+plt.colorbar(im1, label='Traversability Cost', ax=ax1)
+ax2 = fig.add_subplot(2, 2, 2)
+ax2.set_title("Traversability Overlay (Observed Cells Only)")
+observed_overlay = np.where(dem.observed, dem.traversability_overlay, np.nan)
+im2 = ax2.imshow(observed_overlay.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='Reds', alpha=0.75)
+plt.colorbar(im2, label='Traversability Cost', ax=ax2)
+ax3 = fig.add_subplot(2, 2, 3)
+ax3.set_title("Sensed Terrain Confidence")
+im3 = ax3.imshow(dem.confidence.T, extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='plasma', alpha=0.75)
+plt.colorbar(im3, label='Confidence', ax=ax3)
+ax4 = fig.add_subplot(2, 2, 4)
+ax4.set_title("Sensed Terrain Square Error")
+im4 = ax4.imshow(np.square(dem.elevation.T-env.terrain.T), extent=(xmin, xmax, ymin, ymax), origin='lower', cmap='viridis', alpha=0.75)
+plt.colorbar(im4, label='Error', ax=ax4)
+plt.tight_layout()
+overlay_filename = f'./media/Visualizations/costmaps/traversability_overlay_{t_fin:.2f}.png'
+plt.savefig(overlay_filename, dpi=150)
+print("DEM and Traversability Visualizations Saved.")
 
 # ============================================================================
 # Robot POV Visualization
@@ -738,7 +753,7 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
 
 
 print("Rendering Robot POV GIF...")
-pov_gif_path = f"./media/GIFs/robot_pov_{model_name}_{t_fin:.2f}_prob.gif"
+pov_gif_path = f"./media/GIFs/POV/mppi_pov_{model_name}_{t_fin:.2f}_prob.gif"
 
 cam_hfov_deg = float(np.degrees(cam.horizontal_fov))
 cam_vfov_deg = float(np.degrees(cam.vertical_fov))

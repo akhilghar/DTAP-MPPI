@@ -15,7 +15,7 @@ import os
 
 # Create environment with obstacles
 corridor_width = 4.0
-env = StaticEnvironment(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.2)
+env = StaticEnvironment(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.5)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
@@ -73,7 +73,7 @@ config = MPPIConfig(
     Q_obs=250.0,
     d_safe=env.robot_radius + 0.1,
 
-    dynamics_params=np.array([0.2]),
+    dynamics_params=np.array([2*env.robot_radius]),
 
     u_min=umin_mod,
     u_max=umax_mod,
@@ -211,8 +211,8 @@ ani = animation.FuncAnimation(
 )
 
 # Ensure output directories exist
-gif_dir = os.path.join('media', 'GIFs')
-vis_dir = os.path.join('media', 'Visualizations')
+gif_dir = os.path.join('media', 'GIFs', 'Static_GIFs')
+vis_dir = os.path.join('media', 'Visualizations', 'Physics_Results')
 os.makedirs(gif_dir, exist_ok=True)
 os.makedirs(vis_dir, exist_ok=True)
 
@@ -279,7 +279,7 @@ ax4.grid(True)
 ax4.set_title('Convergence to Goal')
 
 plt.tight_layout()
-filename = f'media/Visualizations/mppi_result_{model_name}_{t_fin:.2f}_staticDet.png'
+filename = f'media/Visualizations/Physics_Results/mppi_result_{model_name}_{t_fin:.2f}_staticDet.png'
 plt.savefig(filename, dpi=150)
 # plt.show()
 
