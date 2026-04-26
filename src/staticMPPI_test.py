@@ -19,7 +19,7 @@ env = StaticEnvironment(bounds=(-corridor_width, corridor_width, -4, 24), robot_
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,8):
+for i in range(0,10):
     env.add_circle_obstacle(
         position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
         radius=0.3+0.4*np.random.rand()
@@ -51,8 +51,8 @@ else:
     Q_mod=np.diag([7.0, 7.0, 1.5])
     Qf_mod=np.diag([40.0, 40.0, 5.0])
     R_mod = np.eye(control_dim) * 5.0
-    umin_mod = np.array([-4.0, -4.0])
-    umax_mod = np.array([4.0, 4.0])
+    umin_mod = np.array([-3.0, -3.0])
+    umax_mod = np.array([3.0, 3.0])
     noise_mod = np.array([0.5, 0.5])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
@@ -61,7 +61,7 @@ else:
 
 max_deg = 72.0 # maximum steering angle in degrees
 config = MPPIConfig(
-    num_samples=20000,
+    num_samples=10000,
     horizon=50,
     dt=0.05,
     lambda_=15.0, # increase temperature for smoother trajectory
@@ -232,6 +232,8 @@ ax1 = axes[0, 0]
 ax1.plot(trajectory[:, 0], trajectory[:, 1], 'b-', linewidth=2, label='Trajectory')
 ax1.plot(x0[0], x0[1], 'go', markersize=12, label='Start')
 ax1.plot(x_goal[0], x_goal[1], 'r*', markersize=15, label='Goal')
+for obs in env.obstacles:
+    ax1.add_patch(Circle(obs.position, obs.radius, color='red', ec='black', linewidth=0.5, label='_nolegend_'))
 ax1.legend()
 ax1.set_title('MPPI Trajectory with Obstacle Avoidance')
 ax1.grid(True, alpha=0.3)
@@ -242,8 +244,8 @@ ax1.set_xlim(env.bounds[0]-1, env.bounds[1]+1)
 # Plot 2: Controls
 ax2 = axes[0, 1]
 time = np.arange(len(controls)) * config.dt
-ax2.plot(time, controls[:, 0], label='Acceleration', linewidth=2)
-ax2.plot(time, controls[:, 1], label='Steering', linewidth=2)
+ax2.plot(time, controls[:, 0], label='Right Wheel Velocity', linewidth=2)
+ax2.plot(time, controls[:, 1], label='Left Wheel Velocity', linewidth=2)
 ax2.axhline(config.u_max[0], color='r', linestyle='--', alpha=0.5, label='Limits')
 ax2.axhline(config.u_min[0], color='r', linestyle='--', alpha=0.5)
 ax2.axhline(config.u_max[1], color='orange', linestyle='--', alpha=0.5)
@@ -259,10 +261,6 @@ ax3 = axes[1, 0]
 ax3.plot(time, trajectory[:-1, 2], label='Heading θ')
 if state_dim == 4:
         ax3.plot(time, trajectory[:-1, 3], label='Velocity v')
-else:
-    v_avg = 0.5*controls[:,0] + 0.5*controls[:,1]
-    ax3.plot(time, v_avg, label='Velocity')
-
 ax3.set_xlabel('Time (s)')
 ax3.set_ylabel('State')
 ax3.legend()

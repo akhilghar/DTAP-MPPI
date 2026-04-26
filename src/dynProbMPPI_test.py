@@ -21,7 +21,7 @@ env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,6):
+for i in range(0,5):
     env.add_obstacle(
         Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
                  radius=0.3+0.2*np.random.rand(),
@@ -82,7 +82,7 @@ else:
 
 
 config = MPPIConfig(
-    num_samples=20000,
+    num_samples=18000,
     horizon=40,
     dt=0.05,
     lambda_=30.0, # increase temperature for smoother trajectory
@@ -671,8 +671,8 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
         rgb    = np.zeros((len(scores), 3), dtype=np.float32)
 
         # Color thresholds: green below YELLOW_THR, red above RED_THR
-        YELLOW_THR = 0.35
-        RED_THR    = 0.65
+        YELLOW_THR = 0.40
+        RED_THR    = 0.80
 
         # Unobserved cells → gray
         rgb[~obs] = [140.0, 140.0, 140.0]
@@ -751,59 +751,59 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
 
     return img
 
+if env.dx >= 0.05: # Only render POV if environment is not too slow (smaller cell sizes lead to large images and very long rendering times)
+    print("Rendering Robot POV GIF...")
+    pov_gif_path = f"./media/GIFs/POV/mppi_pov_{model_name}_{t_fin:.2f}_prob.gif"
 
-print("Rendering Robot POV GIF...")
-pov_gif_path = f"./media/GIFs/POV/mppi_pov_{model_name}_{t_fin:.2f}_prob.gif"
+    cam_hfov_deg = float(np.degrees(cam.horizontal_fov))
+    cam_vfov_deg = float(np.degrees(cam.vertical_fov))
 
-cam_hfov_deg = float(np.degrees(cam.horizontal_fov))
-cam_vfov_deg = float(np.degrees(cam.vertical_fov))
+    pov_frames = []
+    for i, state in enumerate(trajectory):
+        frame_img = render_robot_pov_image(
+            robot_state=state,
+            terrain=env.terrain,
+            env_bounds=env.bounds,
+            env_cell_size=env_cell_size,
+            cam_mounting_height=cam.mounting_height,
+            cam_mounting_angle_deg=cam.mounting_angle,
+            cam_hfov_deg=cam_hfov_deg,
+            cam_vfov_deg=cam_vfov_deg,
+            img_w=320, img_h=240,
+            max_range=cam.max_range,
+            upsample=8,
+            point_radius=2,
+            goal_pos=x_goal[:2],
+            trav_overlay=dem.traversability_overlay,
+            trav_observed=dem.observed,
+        )
 
-pov_frames = []
-for i, state in enumerate(trajectory):
-    frame_img = render_robot_pov_image(
-        robot_state=state,
-        terrain=env.terrain,
-        env_bounds=env.bounds,
-        env_cell_size=env_cell_size,
-        cam_mounting_height=cam.mounting_height,
-        cam_mounting_angle_deg=cam.mounting_angle,
-        cam_hfov_deg=cam_hfov_deg,
-        cam_vfov_deg=cam_vfov_deg,
-        img_w=320, img_h=240,
-        max_range=cam.max_range,
-        upsample=8,
-        point_radius=2,
-        goal_pos=x_goal[:2],
-        trav_overlay=dem.traversability_overlay,
-        trav_observed=dem.observed,
+        # HUD overlay
+        pil  = _PILImage.fromarray(frame_img)
+        draw = _ImageDraw.Draw(pil)
+        rpx, rpy    = float(state[0]), float(state[1])
+        heading_deg = float(np.degrees(state[2])) % 360.0
+        dist_goal   = float(np.linalg.norm(state[:2] - x_goal[:2]))
+        pitch_deg   = float(np.degrees(state[3])) if len(state) > 4 else 0.0
+        roll_deg    = float(np.degrees(state[4])) if len(state) > 4 else 0.0
+        draw.text((6,  4), f"Step {i:03d}",                  fill=(255, 255, 200))
+        draw.text((6, 18), f"Pos  ({rpx:.1f}, {rpy:.1f})",  fill=(255, 255, 200))
+        draw.text((6, 32), f"Hdg  {heading_deg:.1f}\u00b0",  fill=(255, 255, 200))
+        draw.text((6, 46), f"Pitch {pitch_deg:.1f}\u00b0",   fill=(255, 255, 200))
+        draw.text((6, 60), f"Roll  {roll_deg:.1f}\u00b0",    fill=(255, 255, 200))
+        draw.text((6, 74), f"Goal {dist_goal:.1f} m",        fill=(255, 255, 200))
+        pov_frames.append(pil)
+
+    duration_ms = max(20, int(config.dt * 1000))
+    pov_frames[0].save(
+        pov_gif_path,
+        save_all=True,
+        append_images=pov_frames[1:],
+        duration=duration_ms,
+        loop=0,
+        optimize=False,
     )
-
-    # HUD overlay
-    pil  = _PILImage.fromarray(frame_img)
-    draw = _ImageDraw.Draw(pil)
-    rpx, rpy    = float(state[0]), float(state[1])
-    heading_deg = float(np.degrees(state[2])) % 360.0
-    dist_goal   = float(np.linalg.norm(state[:2] - x_goal[:2]))
-    pitch_deg   = float(np.degrees(state[3])) if len(state) > 4 else 0.0
-    roll_deg    = float(np.degrees(state[4])) if len(state) > 4 else 0.0
-    draw.text((6,  4), f"Step {i:03d}",                  fill=(255, 255, 200))
-    draw.text((6, 18), f"Pos  ({rpx:.1f}, {rpy:.1f})",  fill=(255, 255, 200))
-    draw.text((6, 32), f"Hdg  {heading_deg:.1f}\u00b0",  fill=(255, 255, 200))
-    draw.text((6, 46), f"Pitch {pitch_deg:.1f}\u00b0",   fill=(255, 255, 200))
-    draw.text((6, 60), f"Roll  {roll_deg:.1f}\u00b0",    fill=(255, 255, 200))
-    draw.text((6, 74), f"Goal {dist_goal:.1f} m",        fill=(255, 255, 200))
-    pov_frames.append(pil)
-
-duration_ms = max(20, int(config.dt * 1000))
-pov_frames[0].save(
-    pov_gif_path,
-    save_all=True,
-    append_images=pov_frames[1:],
-    duration=duration_ms,
-    loop=0,
-    optimize=False,
-)
-print(f"Saved Robot POV GIF: {pov_gif_path}")
+    print(f"Saved Robot POV GIF: {pov_gif_path}")
 
 # Free GPU buffers to ensure clean exit and avoid memory leaks
 mppi.free_gpu_buffers()

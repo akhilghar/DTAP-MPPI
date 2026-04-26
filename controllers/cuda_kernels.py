@@ -152,12 +152,6 @@ def static_cost_min_dist_kernel(
         poly_vertices, poly_starts, poly_lengths, num_polys,
         d_safe, Q_obs, robot_radius,
         num_samples, horizon, state_dim, control_dim, bounds):
-    """
-    Single-pass static obstacle kernel for the baseline controller.
-
-    samples layout: (horizon, num_samples, control_dim)
-    trajectories layout: (num_samples, horizon + 1, state_dim)
-    """
     idx = cuda.grid(1)
     if idx < num_samples:
         cost = 0.0
@@ -236,11 +230,6 @@ def static_cost_min_dist_kernel(
 
 @cuda.jit
 def expected_trajectory_kernel(trajectories, weights, out_traj, num_samples, horizon, state_dim):
-    """
-    Parallel reduction: one block per output element (t, s).
-    Grid = (horizon+1)*state_dim blocks, Block = 256 threads.
-    Each block's threads cooperatively sum over num_samples via shared memory.
-    """
     output_idx = cuda.blockIdx.x
     total = (horizon + 1) * state_dim
     if output_idx >= total:
@@ -293,17 +282,6 @@ def expected_controls_kernel(samples, weights, out_controls, num_samples, horizo
 def obs_mc_rollout_kernel(rng_states, positions, velocities, speeds, radii,
                           xmin, xmax, ymin, ymax,
                           obs_trajs, R, N, horizon, dt, direction_change_prob):
-    """
-    Generate R independent stochastic rollouts of N dynamic obstacles.
-
-    Thread layout: one thread per (rollout, obstacle) pair.
-        tid = r * N + n   →   r = tid // N,  n = tid % N
-
-    Each thread simulates obstacle n for `horizon` timesteps in rollout r,
-    applying random direction changes and wall bouncing.
-
-    Output shape: obs_trajs[r, n, k, xy]  — (R, N, horizon, 2)
-    """
     tid = cuda.grid(1)
     r   = tid // N
     n   = tid  % N
@@ -350,11 +328,6 @@ def obs_mc_rollout_kernel(rng_states, positions, velocities, speeds, radii,
 # ---------------------------------------------------------------------------
 
 def make_rollout_kernel_coalesced(dynamics_func, state_dim, control_dim):
-    """
-    Like make_rollout_kernel but reads samples in (horizon, num_samples, control_dim)
-    layout so that consecutive threads access consecutive memory at each timestep.
-    trajectories layout unchanged: (num_samples, horizon+1, state_dim).
-    """
     @cuda.jit
     def rollout_cuda_coalesced(samples, trajectories, x0, params, dt, terrain, terrain_info, num_samples, horizon):
         idx = cuda.grid(1)
@@ -383,16 +356,6 @@ def make_rollout_kernel_coalesced(dynamics_func, state_dim, control_dim):
 @cuda.jit
 def generate_samples_kernel(rng_states, samples, u_nominal, sigma, u_min, u_max,
                              num_samples, horizon, control_dim):
-    """
-    Generate perturbed control samples entirely on GPU.
-
-    samples:   (horizon, num_samples, control_dim)  — coalesced layout
-    u_nominal: (horizon, control_dim)
-    sigma, u_min, u_max: (control_dim,)
-
-    One thread per sample; draws horizon*control_dim normal values by
-    advancing its own xoroshiro128p state repeatedly.
-    """
     idx = cuda.grid(1)
     if idx < num_samples:
         for t in range(horizon):
@@ -404,133 +367,6 @@ def generate_samples_kernel(rng_states, samples, u_nominal, sigma, u_min, u_max,
                 if u > u_max[d]:
                     u = u_max[d]
                 samples[t, idx, d] = u
-
-"""# Terrain Awareness CUDA Kernels
-@cuda.jit
-def sample_terrain_kernel(rng_states, ground_truth, terrain_xy, terrain_elev,
-                          px, py, theta, sensor_offset, sensor_radius, n_points, 
-                          grid_origin_x, grid_origin_y, cell_size):
-    idx = cuda.grid(1)
-    if idx >= n_points:
-        return
-    
-    # Compute sensed region
-    cx = px + sensor_offset * math.cos(theta)
-    cy = py + sensor_offset * math.sin(theta)
-
-    # Shirley Disk Sampling with Stratification
-    n_radial = 5
-    n_sector = MAX_TERRAIN_POINTS // n_radial
-
-    ring_idx = idx // n_sector
-    sector_idx = idx % n_sector
-    r1 = xoroshiro128p_uniform_float32(rng_states, idx)
-    r2 = xoroshiro128p_uniform_float32(rng_states, idx)
-    
-    r_inner = math.sqrt(ring_idx / n_radial)
-    r_outer = math.sqrt((ring_idx + 1) / n_radial)
-    r = (r_inner + (r_outer - r_inner) * r1)*sensor_radius
-
-    phi_inner = 2.0 * math.pi * float(sector_idx) / float(n_sector)
-    phi_outer = 2.0 * math.pi * float((sector_idx + 1)) / float(n_sector)
-    phi = phi_inner + (phi_outer - phi_inner) * r2
-
-    sx = cx + r * math.cos(phi)
-    sy = cy + r * math.sin(phi)
-
-    # Sample terrain elevation at (sx, sy)
-    gx = (sx - grid_origin_x) / cell_size
-    gy = (sy - grid_origin_y) / cell_size
-
-    ix = int(gx)
-    iy = int(gy)
-
-    # Clamp indices to be within bounds
-    nx = terrain_xy.shape[0]
-    ny = terrain_xy.shape[1]
-    ix = max(0, min(nx - 2, ix))
-    iy = max(0, min(ny - 2, iy))
-
-    # Fractional offsets for bilinear interpolation
-    fx = gx - ix
-    fy = gy - iy
-
-    elev = (
-        ground_truth[ix, iy] * (1 - fx) * (1 - fy) +
-        ground_truth[ix + 1, iy] * fx * (1 - fy) +
-        ground_truth[ix, iy + 1] * (1 - fx) * fy +
-        ground_truth[ix + 1, iy + 1] * fx * fy
-    )
-
-    # Sensor noise model: Gaussian noise with std proportional to elevation
-    depth = math.sqrt((sx - px) ** 2 + (sy - py) ** 2)
-    noise_std = 0.1 * depth * depth  # 10% of depth as std
-    noise = xoroshiro128p_normal_float32(rng_states, idx) * noise_std
-
-    # Write to output arrays
-    terrain_xy[idx, 0] = sx
-    terrain_xy[idx, 1] = sy
-    terrain_elev[idx] = elev + noise
-
-@cuda.jit()
-def sample_slope_kernel(terrain_xy, terrain_elev, n_points, cx, cy, out):
-    tid = cuda.threadIdx.x
-    sh_z = cuda.shared.array(MAX_TERRAIN_POINTS, dtype=numba_float32)
-    sh_sx = cuda.shared.array(MAX_TERRAIN_POINTS, dtype=numba_float32)
-    sh_sy = cuda.shared.array(MAX_TERRAIN_POINTS, dtype=numba_float32)
-    sh_w = cuda.shared.array(MAX_TERRAIN_POINTS, dtype=numba_float32)
-
-    if tid < n_points:
-        dx = terrain_xy[tid, 0] - cx
-        dy = terrain_xy[tid, 1] - cy
-        d2 = dx * dx + dy * dy + 1e-12
-        w = 1.0 / d2
-        sh_z[tid] = terrain_elev[tid]*w
-        sh_w[tid] = w
-    else:
-        sh_z[tid] = 0.0
-        sh_w[tid] = 0.0
-    cuda.syncthreads()
-
-    # Parallel reduction to compute weighted average elevation
-    stride = cuda.blockDim.x >> 1
-    while stride > 0:
-        if tid < stride:
-            sh_z[tid] += sh_z[tid + stride]
-            sh_w[tid] += sh_w[tid + stride]
-        cuda.syncthreads()
-        stride >>= 1
-
-    z_est = sh_z[0] / sh_w[0] if sh_w[0] > 0 else 0.0
-    W = sh_w[0]
-
-    # Compute gradient of the weighted elevation field at (cx, cy) using finite differences
-    cuda.syncthreads()
-    if tid < n_points:
-        dx = terrain_xy[tid, 0] - cx
-        dy = terrain_xy[tid, 1] - cy
-        d2 = dx * dx + dy * dy + 1e-12
-        w4 = 1.0 / (d2*d2)
-        dz = terrain_elev[tid] - z_est
-        sh_sx[tid] = dz * w4 * dx
-        sh_sy[tid] = dz * w4 * dy
-    else:
-        sh_sx[tid] = 0.0
-        sh_sy[tid] = 0.0
-    cuda.syncthreads()
-
-    stride = cuda.blockDim.x >> 1
-    while stride > 0:
-        if tid < stride:
-            sh_sx[tid] += sh_sx[tid + stride]
-            sh_sy[tid] += sh_sy[tid + stride]
-        cuda.syncthreads()
-        stride >>= 1
-
-    if tid == 0:
-        out[0] = z_est
-        out[1] = 2.0 * sh_sx[0] / W  # Slope in x direction
-        out[2] = 2.0 * sh_sy[0] / W  # Slope in y direction"""
 
 @cuda.jit(device=True)
 def get_trav_cost(px, py, trav_cost, origin_x, origin_y, cell_size):
@@ -593,7 +429,7 @@ def mc_cost_and_min_dist_kernel(
             control_cost = 0.0
             for i in range(control_dim):
                 u = samples[t, idx, i]
-                control_cost += R_diag[i] * u * u
+                control_cost += R_diag[i]*u*u
                 control_cost -= sign(u) * 0.4 # Encourage forward motion, discourage backward motion
 
             cost += state_cost + control_cost
