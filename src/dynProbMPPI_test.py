@@ -21,7 +21,7 @@ env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,5):
+for i in range(0,7):
     env.add_obstacle(
         Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
                  radius=0.3+0.2*np.random.rand(),
@@ -30,12 +30,12 @@ for i in range(0,5):
     )
 
 # Add static circular obstacles
-env.add_obstacle(
+"""env.add_obstacle(
     Obstacle(position=[5.0, 5.0], 
              radius=2.0,
              velocity=[0.0, 0.0],
              mode=ObstacleMode.STATIC)
-)
+)"""
 
 #print("Environment Obstacles: ")
 #for obs in env.obstacles:
@@ -82,7 +82,7 @@ else:
 
 
 config = MPPIConfig(
-    num_samples=18000,
+    num_samples=15000,
     horizon=40,
     dt=0.05,
     lambda_=30.0, # increase temperature for smoother trajectory
@@ -194,7 +194,7 @@ for step in range(num_steps):
 
         # classify point cloud
         classify_cell_size = 0.5
-        scores, centers = cam.classify_point_cloud(
+        scores, centers, labels = cam.classify_point_cloud(
             point_cloud=point_cloud,
             classifier=classifier,
             cell_size=classify_cell_size
@@ -206,6 +206,7 @@ for step in range(num_steps):
             r,c = dem.world_to_grid(centers[i])
             if dem.point_in_bounds(r,c):
                 dem.traversability_overlay[r, c] = scores[i]  # weight for traversability cost
+                dem.class_overlay[r, c] = labels[i]
 
         if step % 20 == 0:
             print(f"  [perception] pcl={1e3*(_t_pcl-_t0):.1f}ms  fuse={1e3*(_t_fuse-_t_pcl):.1f}ms  "
@@ -577,7 +578,8 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
                             cam_hfov_deg=90.0, cam_vfov_deg=73.74,
                             img_w=320, img_h=240, max_range=11.0, upsample=8,
                             point_radius=20*env.dx, goal_pos=None,
-                            trav_overlay=None, trav_observed=None):
+                            trav_overlay=None, trav_observed=None,
+                            class_overlay=None):
     # --- Upsample terrain for smoother rendering ---
     terrain_r = _nd_zoom(terrain.astype(np.float32), upsample, order=1)
 
@@ -665,35 +667,37 @@ def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
     fog     = np.clip(depth_v / max_range, 0, 1)[:, np.newaxis]
     fog_col = np.array([[155, 165, 175]], dtype=np.float32)
 
-    if trav_overlay is not None and trav_observed is not None:
+    if class_overlay is not None:
+        cls = class_overlay[orig_ix_v, orig_iy_v]   # -1=unobserved, 0=traversable, 1=caution, 2=non-traversable
+        rgb = np.zeros((len(cls), 3), dtype=np.float32)
+        rgb[cls < 0]  = [140.0, 140.0, 140.0]   # unobserved → gray
+        rgb[cls == 0] = [0.0,   200.0,   0.0]    # traversable → green
+        rgb[cls == 1] = [255.0, 220.0,   0.0]    # caution → yellow
+        rgb[cls >= 2] = [255.0,   0.0,   0.0]    # non-traversable → red
+        rgb = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
+    elif trav_overlay is not None and trav_observed is not None:
         scores = trav_overlay[orig_ix_v, orig_iy_v]
         obs    = trav_observed[orig_ix_v, orig_iy_v]
         rgb    = np.zeros((len(scores), 3), dtype=np.float32)
 
-        # Color thresholds: green below YELLOW_THR, red above RED_THR
         YELLOW_THR = 0.40
         RED_THR    = 0.80
 
-        # Unobserved cells → gray
         rgb[~obs] = [140.0, 140.0, 140.0]
 
-        # Green (0,200,0) → Yellow (255,220,0)  for score in [0, YELLOW_THR]
         low = obs & (scores <= YELLOW_THR)
         t_low = scores[low] / YELLOW_THR
         rgb[low, 0] = t_low * 255.0
-        rgb[low, 1] = 200.0 + t_low * 20.0   # 200 → 220
+        rgb[low, 1] = 200.0 + t_low * 20.0
         rgb[low, 2] = 0.0
 
-        # Yellow (255,220,0) → Red (255,0,0)  for score in (YELLOW_THR, RED_THR]
         mid = obs & (scores > YELLOW_THR) & (scores <= RED_THR)
         t_mid = (scores[mid] - YELLOW_THR) / (RED_THR - YELLOW_THR)
         rgb[mid, 0] = 255.0
         rgb[mid, 1] = (1.0 - t_mid) * 220.0
         rgb[mid, 2] = 0.0
 
-        # Fully red for score > RED_THR
         rgb[obs & (scores > RED_THR)] = [255.0, 0.0, 0.0]
-
         rgb = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
     else:
         # Fallback: elevation colormap
@@ -776,6 +780,7 @@ if env.dx >= 0.05: # Only render POV if environment is not too slow (smaller cel
             goal_pos=x_goal[:2],
             trav_overlay=dem.traversability_overlay,
             trav_observed=dem.observed,
+            class_overlay=dem.class_overlay,
         )
 
         # HUD overlay

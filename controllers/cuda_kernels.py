@@ -275,13 +275,15 @@ def expected_controls_kernel(samples, weights, out_controls, num_samples, horizo
 
 
 # ---------------------------------------------------------------------------
-# Monte Carlo obstacle kernels
+# Dynamic Environment Kernels
 # ---------------------------------------------------------------------------
 
 @cuda.jit
 def obs_mc_rollout_kernel(rng_states, positions, velocities, speeds, radii,
                           xmin, xmax, ymin, ymax,
                           obs_trajs, R, N, horizon, dt, direction_change_prob):
+    
+    # Use Monte Carlo sampling to predict obstacle trajectoreies for Dynamic Environments
     tid = cuda.grid(1)
     r   = tid // N
     n   = tid  % N
@@ -356,6 +358,7 @@ def make_rollout_kernel_coalesced(dynamics_func, state_dim, control_dim):
 @cuda.jit
 def generate_samples_kernel(rng_states, samples, u_nominal, sigma, u_min, u_max,
                              num_samples, horizon, control_dim):
+    # Generates control sequences entirely on GPU using xoroshiro pseudorandom normal sampling
     idx = cuda.grid(1)
     if idx < num_samples:
         for t in range(horizon):
@@ -405,16 +408,8 @@ def mc_cost_and_min_dist_kernel(
         num_samples, horizon, state_dim, control_dim, bounds,
         traversability, trav_rows, trav_cols, 
         origin_x, origin_y, cell_size):
-    """
-    Single-pass kernel that computes both MPPI cost and minimum clearance.
-
-    Replaces the mc_cost_kernel + mc_min_dist_kernel pair, halving the number
-    of expensive inner-loop (R x N) passes over obstacle trajectories.
-
-    trajectories: (num_samples, horizon+1, state_dim)
-    samples:      (horizon, num_samples, control_dim)  — coalesced layout
-    circle_pred:  (R, N, horizon, 2)
-    """
+    
+    # Cost Computation via Parallel Computing on order O(RTP) ~ 10^3 computations per thread
     idx = cuda.grid(1)
     if idx < num_samples:
         cost  = 0.0

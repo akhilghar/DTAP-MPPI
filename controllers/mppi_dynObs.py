@@ -373,7 +373,7 @@ class MPPIDynObs:
 
             if danger > 0.0:
                 target = self.base_covariance * (
-                    1.0 + (self.config.covariance_max_scale - 1.0) * danger
+                    1.0 + (self.config.covariance_max_scale - 1.0) * danger**2
                 )
                 self.current_covariance = np.maximum(self.current_covariance, target)
                 self.config.covariance_decay = 0.3 + 0.6 * danger**3

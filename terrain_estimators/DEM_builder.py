@@ -100,6 +100,8 @@ class DEMBuilder:
 
         # Traversability cost
         self.traversability_overlay = np.full(grid_size, 0.0, dtype=np.float32)
+        # Discrete traversability class per cell: -1=unobserved, 0=traversable, 1=caution, 2=non-traversable
+        self.class_overlay = np.full(grid_size, -1, dtype=np.int8)
 
     def world_to_grid(self, points_xy: np.ndarray) -> np.ndarray:
         grid_coords = (points_xy - self.origin) / self.cell_size

@@ -85,12 +85,6 @@ class Obstacle:
         return self.speed * direction
 
     def _desired_velocity_avoidant(self, robot_pos: Optional[np.ndarray], bounds=None) -> np.ndarray:
-        """
-        Steer away from the robot with strength proportional to 1/dist².
-        Blends with the apathetic wander near the edge of perception so
-        motion stays naturalistic rather than purely reactive.
-        Falls back to apathetic wandering when robot is unperceived.
-        """
         if robot_pos is None:
             return self._desired_velocity_apathetic(bounds)
 
@@ -189,7 +183,7 @@ class ProbabilisticEnv:
         self.obstacles: List[Obstacle] = []
 
         self.terrain = None  # Placeholder for future terrain-aware behavior
-        self.dx = 0.1 # Terrain grid resolution in x direction
+        self.dx = 0.5  # Terrain grid resolution in x direction
         self.dy = self.dx # Terrain grid resolution in y direction
 
     def add_obstacle(self, obstacle: Obstacle) -> None:
@@ -284,10 +278,6 @@ class ProbabilisticEnv:
         return True
 
     def get_nearest_obstacle_distance(self, position: np.ndarray) -> float:
-        """
-        Get distance to nearest obstacle (negative if inside obstacle).
-        Useful for cost functions in trajectory optimization.
-        """
         min_distance = float('inf')
         for obstacle in self.obstacles:
             dist         = np.linalg.norm(position[:2] - obstacle.position)
@@ -334,16 +324,6 @@ class ProbabilisticEnv:
         num_rollouts: int = 50,
         direction_change_prob: float = 0.05,
     ) -> np.ndarray:
-        """
-        CPU Monte Carlo obstacle trajectory prediction.
-
-        Mirrors the output format of obs_mc_rollout_kernel exactly so this can
-        serve as a CPU fallback or for testing/visualisation without a GPU.
-
-        Returns:
-            all_trajs : (R, N, horizon, 2)  — all_trajs[r, n, k, xy] is the
-                        position of obstacle n at step k in rollout r.
-        """
         N = len(self.obstacles)
         R = num_rollouts
 

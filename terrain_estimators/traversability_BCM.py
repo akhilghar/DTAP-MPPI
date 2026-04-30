@@ -160,7 +160,7 @@ def _compute_attribute_vector(points, n_points, expected_density):
 class TraversabilityClassifier:
     def __init__(self, n_classes: int=3, n_attributes: int=8, 
                  buffer_size: int=5000, retrain_interval: int=100,
-                 pitch_limit: float=20.0, roll_limit: float=20.0,
+                 pitch_limit: float=15.0, roll_limit: float=15.0,
                  slip_limit: float=0.5):
         self.n_classes = n_classes
         self.n_attributes = n_attributes

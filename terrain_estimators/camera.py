@@ -236,5 +236,7 @@ class Camera:
         attr_matrix = _batch_attribute_vectors(sorted_pts, sorted_dep, boundaries, n_cells)
         centers = _batch_centers(sorted_pts, boundaries, n_cells)
 
-        scores = classifier.score(attr_matrix).ravel()
-        return scores.astype(np.float32), centers
+        probs = classifier.predict(attr_matrix)
+        scores = (0.5 * probs[:, 1] + 1.0 * probs[:, 2]).ravel()
+        labels = np.argmax(probs, axis=1).astype(np.int8)
+        return scores.astype(np.float32), centers, labels
