@@ -30,12 +30,12 @@ for i in range(0,7):
     )
 
 # Add static circular obstacles
-"""env.add_obstacle(
+env.add_obstacle(
     Obstacle(position=[5.0, 5.0], 
              radius=2.0,
              velocity=[0.0, 0.0],
              mode=ObstacleMode.STATIC)
-)"""
+)
 
 #print("Environment Obstacles: ")
 #for obs in env.obstacles:
@@ -140,8 +140,8 @@ waypoint_selector = WaypointSelector(
     grid_resolution=0.5,
     grid_half_size=6,
     goal_weight=25.0,
-    obstacle_weight=50.0,
-    terrain_weight=5.0,
+    obstacle_weight=30.0,
+    terrain_weight=20.0,
     heading_weight=1.0,
     d_safe=config.d_safe
 )
