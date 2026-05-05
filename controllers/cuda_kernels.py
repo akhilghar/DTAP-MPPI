@@ -331,7 +331,32 @@ def obs_mc_rollout_kernel(rng_states, positions, velocities, speeds, radii,
 
 def make_rollout_kernel_coalesced(dynamics_func, state_dim, control_dim):
     @cuda.jit
-    def rollout_cuda_coalesced(samples, trajectories, x0, params, dt, terrain, terrain_info, num_samples, horizon):
+    def rollout_cuda_coalesced(samples, trajectories, x0, params, dt, num_samples, horizon):
+        idx = cuda.grid(1)
+        if idx < num_samples:
+            for i in range(state_dim):
+                trajectories[idx, 0, i] = x0[i]
+
+            for t in range(horizon):
+                x = cuda.local.array(state_dim, dtype=np.float32)
+                for i in range(state_dim):
+                    x[i] = trajectories[idx, t, i]
+
+                u = cuda.local.array(control_dim, dtype=np.float32)
+                for i in range(control_dim):
+                    u[i] = samples[t, idx, i]      # (H, N, C) layout
+
+                x_next = cuda.local.array(state_dim, dtype=np.float32)
+                dynamics_func(x, u, dt, params, x_next)
+
+                for i in range(state_dim):
+                    trajectories[idx, t + 1, i] = x_next[i]
+
+    return rollout_cuda_coalesced
+
+def make_rollout_kernel_terraneous(dynamics_func, state_dim, control_dim):
+    @cuda.jit
+    def rollout_cuda_terraneous(samples, trajectories, x0, params, dt, terrain, terrain_info, num_samples, horizon):
         idx = cuda.grid(1)
         if idx < num_samples:
             for i in range(state_dim):
@@ -352,7 +377,7 @@ def make_rollout_kernel_coalesced(dynamics_func, state_dim, control_dim):
                 for i in range(state_dim):
                     trajectories[idx, t + 1, i] = x_next[i]
 
-    return rollout_cuda_coalesced
+    return rollout_cuda_terraneous
 
 
 @cuda.jit
@@ -399,6 +424,104 @@ def sign(x):
 
 @cuda.jit
 def mc_cost_and_min_dist_kernel(
+        trajectories, samples, costs, min_dists,
+        x0, x_goal, Q_diag, R_diag, Qf_diag,
+        circle_pred, circle_radii, num_circles, num_obs_rollouts,
+        rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
+        poly_vertices, poly_starts, poly_lengths, num_polys,
+        d_safe, Q_obs, robot_radius,
+        num_samples, horizon, state_dim, control_dim, bounds):
+    
+    # Cost Computation via Parallel Computing on order O(RTP) ~ 10^3 computations per thread
+    idx = cuda.grid(1)
+    if idx < num_samples:
+        cost  = 0.0
+        min_d = 1e9
+
+        for t in range(horizon):
+            state_cost = 0.0
+            for i in range(state_dim):
+                diff_goal = trajectories[idx, t, i] - x_goal[i]
+                state_cost += Q_diag[i] * diff_goal * diff_goal
+
+            control_cost = 0.0
+            for i in range(control_dim):
+                u = samples[t, idx, i]
+                control_cost += R_diag[i]*u*u
+                control_cost -= sign(u) * 0.4 # Encourage forward motion, discourage backward motion
+
+            cost += state_cost + control_cost
+
+            px = trajectories[idx, t, 0]
+            py = trajectories[idx, t, 1]
+
+            # MC circle cost (average over rollouts) + worst-case min_dist
+            obs_cost = 0.0
+            for r in range(num_obs_rollouts):
+                for c in range(num_circles):
+                    obs_px = circle_pred[r, c, t, 0]
+                    obs_py = circle_pred[r, c, t, 1]
+                    dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
+                    if dist < d_safe + 0.25:
+                        obs_cost += Q_obs * (d_safe - dist + robot_radius)
+                    if dist < min_d:
+                        min_d = dist
+            if num_obs_rollouts > 0:
+                cost += obs_cost / num_obs_rollouts
+
+            # Deterministic rectangle cost + clearance
+            for r in range(num_rects):
+                dist = distance_to_rectangle(px, py,
+                    rect_positions[r, 0], rect_positions[r, 1],
+                    rect_widths[r], rect_heights[r])
+                if dist < d_safe:
+                    cost += Q_obs * (d_safe - dist + robot_radius)
+                d_clr = dist - robot_radius
+                if d_clr < min_d:
+                    min_d = d_clr
+
+            # Deterministic polygon cost + clearance
+            for p in range(num_polys):
+                start  = poly_starts[p]
+                length = poly_lengths[p]
+                if is_in_polygon(px, py, poly_vertices, start, length):
+                    cost += Q_obs * (d_safe + robot_radius)
+                    if -1.0 < min_d:
+                        min_d = -1.0
+                else:
+                    dist = distance_to_polygon(px, py, poly_vertices, start, length)
+                    if dist < d_safe:
+                        cost += Q_obs * (d_safe - dist + robot_radius)
+                    d_clr = dist - robot_radius
+                    if d_clr < min_d:
+                        min_d = d_clr
+
+            # Boundary cost
+            if px < bounds[0] + robot_radius:
+                cost += Q_obs * (bounds[0] + robot_radius - px)
+            if px > bounds[1] - robot_radius:
+                cost += Q_obs * (px - (bounds[1] - robot_radius))
+            if py < bounds[2] + robot_radius:
+                cost += Q_obs * (bounds[2] + robot_radius - py)
+            if py > bounds[3] - robot_radius:
+                cost += Q_obs * (py - (bounds[3] - robot_radius))
+
+            # Goal reward
+            if math.sqrt((px - x_goal[0]) ** 2 + (py - x_goal[1]) ** 2) < robot_radius:
+                cost -= 100.0  # Reward for being within goal radius
+
+        # Terminal cost
+        terminal_cost = 0.0
+        for i in range(state_dim):
+            diff = trajectories[idx, horizon, i] - x_goal[i]
+            terminal_cost += Qf_diag[i] * diff * diff
+        cost += terminal_cost
+
+        costs[idx]     = cost
+        min_dists[idx] = min_d
+
+@cuda.jit
+def mc_cost_and_min_dist_terrain_kernel(
         trajectories, samples, costs, min_dists,
         x0, x_goal, Q_diag, R_diag, Qf_diag,
         circle_pred, circle_radii, num_circles, num_obs_rollouts,

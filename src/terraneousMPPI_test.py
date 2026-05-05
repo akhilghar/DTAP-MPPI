@@ -3,10 +3,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import time
-from controllers.mppi_dynObs import MPPIDynObs, MPPIConfig
+from controllers.mppi_terraneous import MPPITerraneous, MPPIConfig
 from controllers.waypointSelector import WaypointSelector
 from dynamics.models import DYNAMICS_REGISTRY
-from environments.dynamicEnv_probabilistic import ProbabilisticEnv, Obstacle, ObstacleMode
+from environments.terraneousEnv import TerraneousEnv, Obstacle, ObstacleMode
 from terrain_estimators.DEM_builder import DEMBuilder
 from terrain_estimators.camera import Camera
 from terrain_estimators.traversability_BCM import TraversabilityClassifier, _compute_attribute_vector
@@ -16,7 +16,7 @@ from terrain_estimators.traversability_BCM import TraversabilityClassifier, _com
 # ============================================================================
 
 # corridor_width = 4.0
-env = ProbabilisticEnv(bounds=(-2, 12, -2, 12), robot_radius=0.3)
+env = TerraneousEnv(bounds=(-2, 12, -2, 12), robot_radius=0.3)
 env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
@@ -26,7 +26,7 @@ for i in range(0,7):
         Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
                  radius=0.3+0.2*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
-                 mode=ObstacleMode.AVOIDANT)
+                 mode=ObstacleMode.AVOIDANT if np.random.rand() < 0.6 else ObstacleMode.APATHETIC)
     )
 
 # Add static circular obstacles
@@ -146,7 +146,7 @@ waypoint_selector = WaypointSelector(
     d_safe=config.d_safe
 )
 
-mppi = MPPIDynObs(config, model.gpu, environment=env, dem=dem)
+mppi = MPPITerraneous(config, model.gpu, environment=env, dem=dem)
 
 # ============================================================================
 # Simulation
@@ -399,7 +399,7 @@ obstacle_patches = []
 for i in range(obstacle_history.shape[1]):
     circle = Circle(obstacle_history[0, i],
                     env.obstacles[i].radius,
-                    color='red')
+                    color='red' if env.obstacles[i].mode == ObstacleMode.AVOIDANT else 'magenta')
     ax.add_patch(circle)
     obstacle_patches.append(circle)
 

@@ -10,9 +10,9 @@ import time
 from environments.terraneousEnv import ObstacleMode
 
 from controllers.cuda_kernels import (
-    make_rollout_kernel_coalesced,
+    make_rollout_kernel_terraneous,
     generate_samples_kernel,
-    mc_cost_and_min_dist_kernel,
+    mc_cost_and_min_dist_terrain_kernel,
     obs_mc_rollout_kernel,
     expected_trajectory_kernel,
     expected_controls_coalesced_kernel
@@ -77,7 +77,7 @@ class MPPIConfig:
             self.dynamics_params = np.array([1.0], dtype=np.float32)
 
 
-class MPPIDynObs:
+class MPPITerraneous:
     def __init__(self, config: MPPIConfig, dynamics_func: Callable, environment, dem):
 
         if not hasattr(dynamics_func, 'metadata'):
@@ -100,6 +100,8 @@ class MPPIDynObs:
 
         self.config = config
         self.environment = environment
+        xmin, _, ymin, _ = self.environment.bounds
+        self.terrain_info = np.array([xmin, ymin, self.environment.dx, self.environment.dy], dtype=np.float32)
 
         self.config.state_dim   = metadata['state_dim']
         self.config.control_dim = metadata['control_dim']
@@ -111,7 +113,7 @@ class MPPIDynObs:
         print(f"CUDA devices: {cuda.gpus}")
 
         print(f"Compiling Rollout Kernel for dynamics: {metadata['name']}...")
-        self.rollout_kernel = make_rollout_kernel_coalesced(
+        self.rollout_kernel = make_rollout_kernel_terraneous(
             dynamics_func, config.state_dim, config.control_dim
         )
 
@@ -190,7 +192,10 @@ class MPPIDynObs:
         self.d_dummy_int1   = cuda.to_device(np.zeros(1,      dtype=np.int32))
 
         # ---- Terrain buffers ----
+        self.d_terrain = cuda.to_device(self.environment.terrain.astype(np.float32))
+        self.d_terrain_info = cuda.to_device(self.terrain_info)
         self.d_bounds = cuda.to_device(np.array(self.environment.bounds, dtype=np.float32))
+        self.d_traversability = cuda.to_device(self.dem.traversability_overlay.astype(np.float32))
 
         self._last_expected_traj = None
 
@@ -312,13 +317,13 @@ class MPPIDynObs:
         # ---- Trajectory rollout ----
         self.rollout_kernel[blocks, threads](
             self.d_samples, self.d_trajectories, self.d_x0, self.d_params,
-            self.config.dt, self.config.num_samples, self.config.horizon,
+            self.config.dt, self.d_terrain, self.d_terrain_info, self.config.num_samples, self.config.horizon,
         )
         cuda.synchronize()
         t3 = time.perf_counter()
 
         # ---- Single-pass cost + min_dist ----
-        mc_cost_and_min_dist_kernel[blocks, threads](
+        mc_cost_and_min_dist_terrain_kernel[blocks, threads](
             self.d_trajectories, self.d_samples, self.d_costs, self.d_min_dists,
             self.d_x0, self.d_x_goal, self.d_Q_diag, self.d_R_diag, self.d_Qf_diag,
             d_circle_pred, d_circle_radii, int(circle_count), R,
@@ -327,7 +332,9 @@ class MPPIDynObs:
             self.config.d_safe, self.config.Q_obs, robot_radius,
             self.config.num_samples, self.config.horizon,
             self.config.state_dim, self.config.control_dim,
-            self.d_bounds
+            self.d_bounds,
+            self.d_traversability, self.dem.traversability_overlay.shape[0], self.dem.traversability_overlay.shape[1],
+            self.terrain_info[0], self.terrain_info[1], self.terrain_info[2],
         )
         cuda.synchronize()
         t5 = time.perf_counter()
@@ -422,6 +429,29 @@ class MPPIDynObs:
         if return_trajectory:
             return u_opt, trajectory, is_safe
         return u_opt, None, is_safe
+    
+    def get_robot_elevation(self, px, py):
+        xmin, _, ymin, _ = self.environment.bounds
+        cell_size = float(self.environment.dx)
+
+        gx = (px - xmin) / cell_size
+        gy = (py - ymin) / cell_size
+
+        ix = int(np.floor(gx))
+        iy = int(np.floor(gy))
+        ix = np.clip(ix, 0, self.environment.terrain.shape[1] - 2)
+        iy = np.clip(iy, 0, self.environment.terrain.shape[0] - 2)
+
+        fx = gx - ix
+        fy = gy - iy
+
+        elev = (
+            self.environment.terrain[iy, ix] * (1 - fx) * (1 - fy) +
+            self.environment.terrain[iy, ix + 1] * fx * (1 - fy) +
+            self.environment.terrain[iy + 1, ix] * (1 - fx) * fy +
+            self.environment.terrain[iy + 1, ix + 1] * fx * fy
+        )
+        return elev
 
     def get_control(self, x0: np.ndarray, x_goal: np.ndarray, require_safe: bool = True):
         u_opt, trajectory, is_safe = self.solve(

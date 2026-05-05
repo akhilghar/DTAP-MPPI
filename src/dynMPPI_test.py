@@ -5,13 +5,13 @@ import matplotlib.pyplot as plt
 import time
 from controllers.mppi_dynObs import MPPIDynObs, MPPIConfig
 from dynamics.models import DYNAMICS_REGISTRY
-from environments.dynamicEnv_deterministic import DeterministicEnv, Obstacle
+from environments.dynamicEnv import DynamicEnv, Obstacle, ObstacleMode
 
 # ============================================================================
 # Setup Environment
 # ============================================================================
 corridor_width = 4.0
-env = DeterministicEnv(bounds=(-2, 12, -2, 12), robot_radius=0.3)
+env = DynamicEnv(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.3)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
@@ -19,7 +19,8 @@ for i in range(0,8):
     env.add_obstacle(
         Obstacle(position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
                  radius=0.3+0.4*np.random.rand(),
-                 velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0])
+                 velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
+                 mode=ObstacleMode.AVOIDANT)
     )
 
 # ============================================================================
@@ -27,7 +28,7 @@ for i in range(0,8):
 # ============================================================================
 
 # Define function used, reference this function exclusively
-model_name = "differential_drive"  # "differential_drive", "ackermann", "bicycle"
+model_name = "differential_drive_noslope"  # "differential_drive", "ackermann", "bicycle"
 model = DYNAMICS_REGISTRY[model_name]
 
 model_md = model.metadata
@@ -50,16 +51,16 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([1.0, 1.0, 0.5, 1.0, 2.0])
-    Qf_mod=np.diag([40.0, 40.0, 0.5, 10.0, 10.0])
-    R_mod = np.eye(control_dim)
+    Q_mod=np.diag([7.0, 7.0, 1.5])
+    Qf_mod=np.diag([40.0, 40.0, 5.0])
+    R_mod = np.eye(control_dim) * 5.0
     umin_mod = np.array([-3.0, -3.0])
     umax_mod = np.array([3.0, 3.0])
-    noise_mod = np.array([0.65, 0.65])
+    noise_mod = np.array([0.5, 0.5])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
-    x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
-    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])
+    x0 = np.array([0.0, 0.0, 0.0])
+    x_goal = np.array([0.0, 20.0, 0.0])
 
 config = MPPIConfig(
     num_samples=20000,
@@ -74,7 +75,7 @@ config = MPPIConfig(
     Q_obs=190.0,
     d_safe=env.robot_radius + 0.1,
 
-    dynamics_params=np.array([2*env.robot_radius, 0.1]),
+    dynamics_params=np.array([2*env.robot_radius]),
 
     u_min=umin_mod,
     u_max=umax_mod,
@@ -106,7 +107,7 @@ sim_start_time = time.time()
 for step in range(num_steps):
 
     # --- Step environment first (obstacles move) ---
-    env.step(config.dt)
+    env.move_obstacles(config.dt, robot_pos=x[:2])
     obstacle_history.append(
         np.array([obs.position.copy() for obs in env.obstacles])
     )
