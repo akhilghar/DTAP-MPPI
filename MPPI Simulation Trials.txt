@@ -1,4 +1,0 @@
-Use D* Lite Path Planner with MPPI
-OR Invariant Sets with Barrier Functions (more trendy methodology)
-
-
