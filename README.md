@@ -72,7 +72,7 @@ Python package dependencies (managed by uv):
 
 | Package | Purpose |
 |---|---|
-| `numba` | GPU kernel compilation via CUDA |
+| `numba` | GPU kernel compilation via CUDA + NJIT Compilation |
 | `numpy` | Array math |
 | `matplotlib` | Visualization and GIF export |
 | `pillow` | Image rendering for POV GIFs |
