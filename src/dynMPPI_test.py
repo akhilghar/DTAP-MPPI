@@ -28,7 +28,7 @@ for i in range(0,8):
 # ============================================================================
 
 # Define function used, reference this function exclusively
-model_name = "differential_drive_noslope"  # "differential_drive", "ackermann", "bicycle"
+model_name = "bicycle"  # "differential_drive", "ackermann", "bicycle"
 model = DYNAMICS_REGISTRY[model_name]
 
 model_md = model.metadata

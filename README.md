@@ -149,3 +149,14 @@ The `MPPIConfig` dataclass controls the planner. The most impactful ones:
 | `Q`, `Qf`, `R` | State tracking, terminal, and control cost weights |
 | `Q_obs` | Obstacle penalty weight |
 | `noise_sigma` | Per-dimension control perturbation magnitude |
+
+## Some Notes on the Dynamics Models
+
+The Dynamics Registry in `models.py` features differential drive, bicycle, and Ackermann kinematic models for the robot. Currently, the differential drive is the only model featuring terraneous and superflat compatibility. These updates are to be reflected in the bicycle and Ackermann models. Some important notes about these models are tabulated below:
+
+| Model | States | Control Inputs | Parameters |
+|---|---|---|---|
+| `differential_drive` | horizontal pos `x (m)`, vertical pos `y (m)`, heading `θ (rad)`, pitch `ψ (rad)`, roll `φ (rad)` | left wheel velocity `v_l (m/s)`, right wheel velocity `v_r (m/s)` | wheelbase `L (m)`, drag coefficient `κ` |
+| `differential_drive_noslope` | horizontal pos `x (m)`, vertical pos `y (m)`, heading `θ (rad)` | left wheel velocity `v_l (m/s)`, right wheel velocity `v_r (m/s)` | wheelbase `L (m)` |
+| `bicycle` | horizontal pos `x (m)`, vertical pos `y (m)`, heading `θ (rad)`, speed `v (m/s)` | acceleration `a (m/s^2)`, steering angle `γ (rad)` | wheelbase `L (m)` |
+| `ackermann` | horizontal pos `x (m)`, vertical pos `y (m)`, heading `θ (rad)`, speed `v (m/s)` | acceleration `a (m/s^2)`, steering angle `γ (rad)` | wheelbase `L (m)` |
