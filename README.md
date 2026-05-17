@@ -1,6 +1,6 @@
 # DTAP-MPPI
 
-DTAP-MPPI (Dynamic Terrain-Aware Payload MPPI) is an augmented control algorithm based on the Model-Predictive Path Integral (MPPI) framework. The augmentations optimize MPPI for payload-transportation robots operating in environments with dynamic obstacles and uneven terrain. The controller samples thousands of candidate trajectories in parallel on the GPU, evaluates their costs, and computes a weighted optimal control update — all in real time.
+DTAP-MPPI (Dynamic Terrain-Aware Perceptive MPPI) is an augmented control algorithm based on the Model-Predictive Path Integral (MPPI) framework. The augmentations optimize MPPI for payload-transportation robots operating in environments with dynamic obstacles and uneven terrain. The controller samples thousands of candidate trajectories in parallel on the GPU, evaluates their costs, and computes a weighted optimal control update — all in real time.
 
 This repository uses [Numba-CUDA](https://numba.readthedocs.io/en/stable/cuda/index.html) for GPU-accelerated trajectory rollouts in a pure Python environment.
 
