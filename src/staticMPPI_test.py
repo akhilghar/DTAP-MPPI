@@ -14,16 +14,19 @@ import os
 # ============================================================================
 
 # Create environment with obstacles
-corridor_width = 4.0
-env = StaticEnvironment(bounds=(-corridor_width, corridor_width, -4, 24), robot_radius=0.5)
+# corridor_width = 4.0
+env = StaticEnvironment(bounds=(-4, 24, -4, 24), robot_radius=0.5)
+goalpos = np.array([20.0, 20.0])
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,10):
+for i in range(0,30):
     env.add_circle_obstacle(
-        position=[np.random.randint(-corridor_width+1, corridor_width-1), np.random.randint(1.0, 22.0)], 
+        position=[np.random.randint(-4+1, 24-1), np.random.randint(1.0, 22.0)], 
         radius=0.3+0.4*np.random.rand()
     )
+    if np.array_equal(env.obstacles[i].position, goalpos):
+        env.obstacles[i].position += np.array([0.0, 1.0])  # Shift obstacle if it coincides with the goal
 
 # Configure MPPI
 
@@ -45,7 +48,7 @@ if state_dim == 4:
     ctrl_label_1 = "Acceleration"
     ctrl_label_2 = "Steering Angle"
     x0 = np.array([0.0, 0.0, np.pi/2, 0.0])
-    x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
+    x_goal = np.array([20.0, 20.0, np.pi/2, 0.0])
 
 else:
     Q_mod=np.diag([7.0, 7.0, 1.5])
@@ -57,7 +60,7 @@ else:
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
     x0 = np.array([0.0, 0.0, 0.0])
-    x_goal = np.array([0.0, 20.0, 0.0])
+    x_goal = np.array([20.0, 20.0, 0.0])
 
 max_deg = 72.0 # maximum steering angle in degrees
 config = MPPIConfig(

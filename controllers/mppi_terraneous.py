@@ -183,6 +183,12 @@ class MPPITerraneous:
         self._h_obs_spd   = np.zeros(N_c,      dtype=np.float32)
         self._h_obs_radii = np.zeros(N_c,      dtype=np.float32)
 
+        # ---- Static obstacle buffers (no MC rollouts — fixed positions only) ----
+        self.d_static_circle_pos   = cuda.device_array((N_c, 2), dtype=np.float32)
+        self.d_static_circle_radii = cuda.device_array(N_c,      dtype=np.float32)
+        self._h_static_circle_pos   = np.zeros((N_c, 2), dtype=np.float32)
+        self._h_static_circle_radii = np.zeros(N_c,      dtype=np.float32)
+
         # ---- MC obstacle rollout buffer: (R, max_obs, H, 2) ----
         self.d_obs_rollouts = cuda.device_array((R, N_c, H, 2), dtype=np.float32)
 
@@ -231,40 +237,34 @@ class MPPITerraneous:
         cuda.synchronize()
         t1 = time.perf_counter()
 
-        # ---- Obstacle MC rollouts ----
-        obstacles     = self.environment.get_obstacle_data()
-        circles       = obstacles['circles']
-        circle_count  = circles['count']
+        # ---- Split obstacles: dynamic (MC rollouts) vs static (fixed positions) ----
+        dynamic_obs = [obs for obs in self.environment.obstacles if obs.mode != ObstacleMode.STATIC]
+        static_obs  = [obs for obs in self.environment.obstacles if obs.mode == ObstacleMode.STATIC]
+        dyn_count   = len(dynamic_obs)
+        stat_count  = len(static_obs)
 
-        if circle_count > 0:
-            if circle_count > self.config.max_obstacles:
-                raise ValueError(
-                    f"Obstacle count {circle_count} exceeds max_obstacles="
-                    f"{self.config.max_obstacles}. Increase MPPIConfig.max_obstacles."
-                )
+        if dyn_count + stat_count > self.config.max_obstacles:
+            raise ValueError(
+                f"Obstacle count {dyn_count + stat_count} exceeds max_obstacles="
+                f"{self.config.max_obstacles}. Increase MPPIConfig.max_obstacles."
+            )
 
+        if dyn_count > 0:
             R = self.config.obs_pred_rollouts
-            N = circle_count
-
-            # Populate host-side staging buffers (no per-call numpy alloc)
-            for i, obs in enumerate(self.environment.obstacles):
+            for i, obs in enumerate(dynamic_obs):
                 self._h_obs_pos[i]   = obs.position
-                self._h_obs_vel[i]   = obs.velocity if obs.mode != ObstacleMode.STATIC else np.zeros(2, dtype=np.float32)
+                self._h_obs_vel[i]   = obs.velocity
                 self._h_obs_spd[i]   = float(np.linalg.norm(obs.velocity))
                 self._h_obs_radii[i] = obs.radius
-
             cuda.to_device(self._h_obs_pos,   to=self.d_obs_pos)
             cuda.to_device(self._h_obs_vel,   to=self.d_obs_vel)
             cuda.to_device(self._h_obs_spd,   to=self.d_obs_spd)
             cuda.to_device(self._h_obs_radii, to=self.d_obs_radii)
-
-            # Lazily (re)allocate obs RNG states if R×N has grown
-            n_rng = R * N
+            n_rng = R * dyn_count
             if self._obs_rng_states is None or n_rng > self._obs_rng_n_states:
                 seed = int(np.random.randint(1, 2**31))
                 self._obs_rng_states   = create_xoroshiro128p_states(n_rng, seed=seed)
                 self._obs_rng_n_states = n_rng
-
             xmin, xmax, ymin, ymax = self.environment.bounds
             blocks_mc = (n_rng + threads - 1) // threads
             obs_mc_rollout_kernel[blocks_mc, threads](
@@ -272,19 +272,32 @@ class MPPITerraneous:
                 self.d_obs_pos, self.d_obs_vel, self.d_obs_spd, self.d_obs_radii,
                 np.float32(xmin), np.float32(xmax),
                 np.float32(ymin), np.float32(ymax),
-                self.d_obs_rollouts, R, N, self.config.horizon,
+                self.d_obs_rollouts, R, dyn_count, self.config.horizon,
                 np.float32(self.config.dt),
                 np.float32(self.config.obs_direction_change_prob),
             )
             cuda.synchronize()
             t2 = time.perf_counter()
-
             d_circle_pred  = self.d_obs_rollouts
             d_circle_radii = self.d_obs_radii
         else:
             R = 0
             d_circle_pred  = cuda.to_device(np.zeros((1, 1, 1, 2), dtype=np.float32))
             d_circle_radii = cuda.to_device(np.zeros(1,             dtype=np.float32))
+
+        if stat_count > 0:
+            for i, obs in enumerate(static_obs):
+                self._h_static_circle_pos[i]   = obs.position
+                self._h_static_circle_radii[i] = obs.radius
+            cuda.to_device(self._h_static_circle_pos,   to=self.d_static_circle_pos)
+            cuda.to_device(self._h_static_circle_radii, to=self.d_static_circle_radii)
+            d_static_pos   = self.d_static_circle_pos
+            d_static_radii = self.d_static_circle_radii
+        else:
+            d_static_pos   = self.d_dummy_vec2
+            d_static_radii = self.d_dummy_float1
+
+        obstacles = self.environment.get_obstacle_data()
 
         # ---- Rectangles ----
         rects      = obstacles['rectangles']
@@ -326,7 +339,8 @@ class MPPITerraneous:
         mc_cost_and_min_dist_terrain_kernel[blocks, threads](
             self.d_trajectories, self.d_samples, self.d_costs, self.d_min_dists,
             self.d_x0, self.d_x_goal, self.d_Q_diag, self.d_R_diag, self.d_Qf_diag,
-            d_circle_pred, d_circle_radii, int(circle_count), R,
+            d_circle_pred, d_circle_radii, int(dyn_count), R,
+            d_static_pos, d_static_radii, int(stat_count),
             d_rect_pos, d_rect_widths, d_rect_heights, d_rect_angles, int(rect_count),
             d_poly_verts, d_poly_starts, d_poly_lengths, int(poly_count),
             self.config.d_safe, self.config.Q_obs, robot_radius,
@@ -496,7 +510,8 @@ class MPPITerraneous:
             'd_Q_diag', 'd_R_diag', 'd_Qf_diag', 'd_params',
             'd_u_min', 'd_u_max', 'd_x0', 'd_x_goal', 'd_sigma', 'd_u_nominal',
             'd_obs_pos', 'd_obs_vel', 'd_obs_spd', 'd_obs_radii',
-            'd_obs_rollouts', 'd_dummy_vec2', 'd_dummy_float1', 'd_dummy_int1',
+            'd_obs_rollouts', 'd_static_circle_pos', 'd_static_circle_radii',
+            'd_dummy_vec2', 'd_dummy_float1', 'd_dummy_int1',
         )
 
         for n in names:

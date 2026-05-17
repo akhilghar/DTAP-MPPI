@@ -525,11 +525,12 @@ def mc_cost_and_min_dist_terrain_kernel(
         trajectories, samples, costs, min_dists,
         x0, x_goal, Q_diag, R_diag, Qf_diag,
         circle_pred, circle_radii, num_circles, num_obs_rollouts,
+        static_circle_positions, static_circle_radii, num_static_circles,
         rect_positions, rect_widths, rect_heights, rect_angles, num_rects,
         poly_vertices, poly_starts, poly_lengths, num_polys,
         d_safe, Q_obs, robot_radius,
         num_samples, horizon, state_dim, control_dim, bounds,
-        traversability, trav_rows, trav_cols, 
+        traversability, trav_rows, trav_cols,
         origin_x, origin_y, cell_size):
     
     # Cost Computation via Parallel Computing on order O(RTP) ~ 10^3 computations per thread
@@ -561,13 +562,23 @@ def mc_cost_and_min_dist_terrain_kernel(
                 for c in range(num_circles):
                     obs_px = circle_pred[r, c, t, 0]
                     obs_py = circle_pred[r, c, t, 1]
-                    dist   = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
+                    dist = distance_to_circle(px, py, obs_px, obs_py, circle_radii[c])
                     if dist < d_safe + 0.25:
                         obs_cost += Q_obs * (d_safe - dist + robot_radius)
                     if dist < min_d:
                         min_d = dist
             if num_obs_rollouts > 0:
                 cost += obs_cost / num_obs_rollouts
+
+            # Deterministic static circle cost (fixed positions, no MC rollouts)
+            for c in range(num_static_circles):
+                obs_px = static_circle_positions[c, 0]
+                obs_py = static_circle_positions[c, 1]
+                dist = distance_to_circle(px, py, obs_px, obs_py, static_circle_radii[c])
+                if dist < d_safe:
+                    cost += Q_obs * (d_safe - dist + robot_radius)
+                if dist < min_d:
+                    min_d = dist
 
             # Deterministic rectangle cost + clearance
             for r in range(num_rects):
