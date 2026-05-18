@@ -194,6 +194,6 @@ class DEMBuilder:
         cost_grid = self.get_traversability_cost()
         trrn_cost = cost_grid[rows, cols]
 
-        classification_cost = self.traversability_overlay[rows, cols]*50.0
+        classification_cost = self.traversability_overlay[rows, cols]
         total_cost = trrn_cost + classification_cost
         return total_cost

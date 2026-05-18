@@ -397,23 +397,6 @@ def generate_samples_kernel(rng_states, samples, u_nominal, sigma, u_min, u_max,
                 samples[t, idx, d] = u
 
 @cuda.jit(device=True)
-def get_trav_cost(px, py, trav_cost, origin_x, origin_y, cell_size):
-    # Compute the traversal cost at position (px, py) by looking up the corresponding cell in the trav_cost grid
-    gx = (px - origin_x) / cell_size
-    gy = (py - origin_y) / cell_size
-
-    ix = int(gx)
-    iy = int(gy)
-
-    # Clamp indices to be within bounds
-    nx = trav_cost.shape[0]
-    ny = trav_cost.shape[1]
-    ix = max(0, min(nx - 1, ix))
-    iy = max(0, min(ny - 1, iy))
-
-    return trav_cost[ix, iy]
-
-@cuda.jit(device=True)
 def sign(x):
     if x > 0:
         return 1.0
@@ -612,10 +595,10 @@ def mc_cost_and_min_dist_terrain_kernel(
 
             if 0 <= grid_r < trav_rows and 0 <= grid_c < trav_cols:
                 trav_score = traversability[grid_r, grid_c]
-                if trav_score > 0.7:
-                    cost += 1000.0  # Impose a very high cost for traversing non-traversable terrain
+                if trav_score > 0.8:
+                    cost += 50.0  # Hard penalty for non-traversable terrain
                 elif trav_score > 0.4:
-                    cost += trav_score*10.0    # Impose a moderate cost for traversing partially traversable terrain
+                    cost += (trav_score-0.4)*10.0/0.4    # Soft penalty for cautious terrain
 
             # Boundary cost
             if px < bounds[0] + robot_radius:

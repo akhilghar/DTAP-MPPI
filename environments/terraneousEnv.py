@@ -183,7 +183,7 @@ class TerraneousEnv:
         self.obstacles: List[Obstacle] = []
 
         self.terrain = None  # Placeholder for future terrain-aware behavior
-        self.dx = 0.5  # Terrain grid resolution in x direction
+        self.dx = 0.05  # Terrain grid resolution in x direction
         self.dy = self.dx # Terrain grid resolution in y direction
 
     def add_obstacle(self, obstacle: Obstacle) -> None:
@@ -367,20 +367,19 @@ class TerraneousEnv:
         return all_trajs
 
     def generate_terrain(self, flat: bool) -> None:
+        from scipy.ndimage import gaussian_filter
         xmin, xmax, ymin, ymax = self.bounds
         terrain_size_x = int((xmax - xmin) / self.dx)
         terrain_size_y = int((ymax - ymin) / self.dy)
 
         if flat:
-            self.terrain = np.zeros((terrain_size_x, terrain_size_y), dtype=np.float32)  # Flat terrain has zero cost everywhere
+            self.terrain = np.zeros((terrain_size_x, terrain_size_y), dtype=np.float32)
             return
-
-        terrain_startpos_x = int(-xmin / self.dx)
-        terrain_startpos_y = int(-ymin / self.dy)
-        terrain_goalpos_x = int((10.0-xmin) / self.dx) # Change this if the goal is not at (10,10)
-        terrain_goalpos_y = int((10.0-ymin) / self.dy) # Change this if the goal is not at (10,10)
-
-        self.terrain = 0.25*np.linalg.norm(np.array([self.dx, self.dy]))*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
+        
+        sigma_cells = self.dx
+        raw = 0.25*self.dx*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
+        smooth = gaussian_filter(raw, sigma=sigma_cells)
+        self.terrain = smooth.astype(np.float32)
 
 
     def get_visualization_data(self) -> dict:

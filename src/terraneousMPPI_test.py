@@ -26,7 +26,7 @@ for i in range(0,7):
         Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
                  radius=0.3+0.2*np.random.rand(),
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
-                 mode=ObstacleMode.AVOIDANT if np.random.rand() < 0.6 else ObstacleMode.APATHETIC)
+                 mode=ObstacleMode.AVOIDANT)
     )
 
 # Add static circular obstacles
@@ -141,8 +141,8 @@ waypoint_selector = WaypointSelector(
     grid_half_size=6,
     goal_weight=25.0,
     obstacle_weight=30.0,
-    terrain_weight=20.0,
-    heading_weight=1.0,
+    terrain_weight=15.0,
+    heading_weight=1.5,
     d_safe=config.d_safe
 )
 
@@ -309,7 +309,7 @@ for step in range(num_steps):
               f"safe={is_safe}, "
               f"online={1e3*(_t_online-_t0):.1f}ms  wp={1e3*(_t_wp-_t_online):.1f}ms  mppi={1e3*_t_mppi:.1f}ms")
         
-    if step % 50 == 0 & step > 0:
+    if (step % 50 == 0) and (step > 0):
         recent_disp = np.linalg.norm(trajectory[-1][:2] - trajectory[-50][:2])
         if recent_disp < 0.2:
             mppi.reset_warm_start()

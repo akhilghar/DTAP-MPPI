@@ -224,6 +224,7 @@ class MPPITerraneous:
         cuda.to_device(x_goal.astype(np.float32),              to=self.d_x_goal)
         cuda.to_device(self.current_covariance.astype(np.float32), to=self.d_sigma)
         cuda.to_device(self.u_nominal.astype(np.float32),      to=self.d_u_nominal)
+        cuda.to_device(self.dem.traversability_overlay.astype(np.float32), to=self.d_traversability)
 
         threads = 128
         blocks  = (self.config.num_samples + threads - 1) // threads
