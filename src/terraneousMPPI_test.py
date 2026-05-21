@@ -82,7 +82,7 @@ else:
 
 
 config = MPPIConfig(
-    num_samples=15000,
+    num_samples=6500,
     horizon=40,
     dt=0.05,
     lambda_=30.0, # increase temperature for smoother trajectory
@@ -91,7 +91,7 @@ config = MPPIConfig(
     Qf=Qf_mod,
     R=R_mod,
 
-    Q_obs=190.0,
+    Q_obs=100.0,
     d_safe=env.robot_radius + 0.1,
 
     dynamics_params=np.array([2*env.robot_radius, 0.1]),
@@ -138,11 +138,11 @@ dem = DEMBuilder(origin=env_origin, cell_size=env_cell_size, grid_size=env_grid_
 
 waypoint_selector = WaypointSelector(
     grid_resolution=0.5,
-    grid_half_size=6,
+    grid_half_size=3,
     goal_weight=25.0,
     obstacle_weight=30.0,
-    terrain_weight=15.0,
-    heading_weight=1.5,
+    terrain_weight=12.5,
+    heading_weight=0.5,
     d_safe=config.d_safe
 )
 
@@ -307,7 +307,7 @@ for step in range(num_steps):
               f"Subgoal=({subgoal[0]:.2f},{subgoal[1]:.2f}), "
               f"position_error={np.linalg.norm(x[:2]-x_goal[:2]):.2f}, "
               f"safe={is_safe}, "
-              f"online={1e3*(_t_online-_t0):.1f}ms  wp={1e3*(_t_wp-_t_online):.1f}ms  mppi={1e3*_t_mppi:.1f}ms")
+              f"online={1e3*(_t_online-_t0):.1f}ms mppi={1e3*_t_mppi:.1f}ms")
         
     if (step % 50 == 0) and (step > 0):
         recent_disp = np.linalg.norm(trajectory[-1][:2] - trajectory[-50][:2])
