@@ -376,7 +376,7 @@ class TerraneousEnv:
             self.terrain = np.zeros((terrain_size_x, terrain_size_y), dtype=np.float32)
             return
         
-        sigma_cells = self.dx
+        sigma_cells = 0.7*self.dx
         raw = 0.7*self.dx*self.dx*np.random.randn(terrain_size_x, terrain_size_y).astype(np.float32)
         smooth = gaussian_filter(raw, sigma=sigma_cells)
         self.terrain = smooth.astype(np.float32)

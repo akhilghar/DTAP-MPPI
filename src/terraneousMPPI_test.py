@@ -69,8 +69,8 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([1.0, 1.0, 0.5, 1.0, 2.0])
-    Qf_mod=np.diag([40.0, 40.0, 0.5, 10.0, 10.0])
+    Q_mod=np.diag([1.0, 1.0, 0.75, 1.0, 2.0])
+    Qf_mod=np.diag([40.0, 40.0, 1.0, 10.0, 10.0])
     R_mod = np.eye(control_dim)
     umin_mod = np.array([-3.0, -3.0])
     umax_mod = np.array([3.0, 3.0])
@@ -82,7 +82,7 @@ else:
 
 
 config = MPPIConfig(
-    num_samples=6500,
+    num_samples=10000,
     horizon=40,
     dt=0.05,
     lambda_=30.0, # increase temperature for smoother trajectory
@@ -91,7 +91,7 @@ config = MPPIConfig(
     Qf=Qf_mod,
     R=R_mod,
 
-    Q_obs=100.0,
+    Q_obs=110.0,
     d_safe=env.robot_radius + 0.1,
 
     dynamics_params=np.array([2*env.robot_radius, 0.1]),
@@ -142,7 +142,7 @@ waypoint_selector = WaypointSelector(
     goal_weight=25.0,
     obstacle_weight=30.0,
     terrain_weight=12.5,
-    heading_weight=0.5,
+    heading_weight=1.0,
     d_safe=config.d_safe
 )
 
