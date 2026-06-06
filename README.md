@@ -10,7 +10,7 @@ This repository uses [Numba-CUDA](https://numba.readthedocs.io/en/stable/cuda/in
 
 | Bird's-Eye View | Robot POV |
 |:---:|:---:|
-| ![BEV](media/GIFs/BirdsEyeView/mppi_BEV_differential_drive_9.27_prob.gif) | ![POV](media/GIFs/POV/mppi_pov_differential_drive_9.27_prob.gif) |
+| ![BEV](media/GIFs/BirdsEyeView/mppi_BEV_differential_drive_9.13_prob.gif) | ![POV](media/GIFs/POV/mppi_pov_differential_drive_9.13_prob.gif) |
 | Terrain elevation overlay, sampled rollouts (orange), weighted-mean trajectory (green), dynamic obstacles (red), and subgoal (green star). | Simulated stereo-camera view with traversability coloring: green = safe, yellow = caution, red = avoid. |
 
 ---
