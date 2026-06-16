@@ -15,24 +15,24 @@ from terrain_estimators.traversability_BCM import TraversabilityClassifier, _com
 # Setup Environment
 # ============================================================================
 
-# corridor_width = 4.0
-env = TerraneousEnv(bounds=(-2, 12, -2, 12), robot_radius=0.3)
+env_scale = 2.0
+env = TerraneousEnv(bounds=(-2*env_scale, 12*env_scale, -2*env_scale, 12*env_scale), robot_radius=0.3)
 env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
 for i in range(0,7):
     env.add_obstacle(
-        Obstacle(position=[np.random.randint(2.0, 11.0), np.random.randint(2.0, 11.0)], 
-                 radius=0.3+0.2*np.random.rand(),
+        Obstacle(position=[np.random.randint(2.0, 11.0*env_scale), np.random.randint(2.0, 11.0*env_scale)], 
+                 radius=(0.3+0.2*np.random.rand())*env_scale,
                  velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
                  mode=ObstacleMode.AVOIDANT)
     )
 
 # Add static circular obstacles
 env.add_obstacle(
-    Obstacle(position=[5.0, 5.0], 
-             radius=2.0,
+    Obstacle(position=[5.0*env_scale, 4.0*env_scale], 
+             radius=2.0*env_scale,
              velocity=[0.0, 0.0],
              mode=ObstacleMode.STATIC)
 )
@@ -69,20 +69,20 @@ if state_dim == 4:
     x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
 
 else:
-    Q_mod=np.diag([1.0, 1.0, 0.75, 1.0, 2.0])
-    Qf_mod=np.diag([40.0, 40.0, 1.0, 10.0, 10.0])
+    Q_mod=np.diag([10.0, 10.0, 0.75, 1.0, 2.0])
+    Qf_mod=np.diag([100.0, 100.0, 1.0, 10.0, 10.0])
     R_mod = np.eye(control_dim)
     umin_mod = np.array([-3.0, -3.0])
     umax_mod = np.array([3.0, 3.0])
-    noise_mod = np.array([0.65, 0.65])
+    noise_mod = np.array([0.8, 0.8])
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
     x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
-    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])
+    x_goal = np.array([20.0, 20.0, 0.0, 0.0, 0.0])
 
 
 config = MPPIConfig(
-    num_samples=10000,
+    num_samples=8500,
     horizon=40,
     dt=0.05,
     lambda_=30.0, # increase temperature for smoother trajectory
@@ -91,10 +91,10 @@ config = MPPIConfig(
     Qf=Qf_mod,
     R=R_mod,
 
-    Q_obs=110.0,
+    Q_obs=100.0,
     d_safe=env.robot_radius + 0.1,
 
-    dynamics_params=np.array([2*env.robot_radius, 0.1]),
+    dynamics_params=np.array([2*env.robot_radius, 0.01]),
 
     u_min=umin_mod,
     u_max=umax_mod,
@@ -138,11 +138,11 @@ dem = DEMBuilder(origin=env_origin, cell_size=env_cell_size, grid_size=env_grid_
 
 waypoint_selector = WaypointSelector(
     grid_resolution=0.5,
-    grid_half_size=3,
-    goal_weight=25.0,
-    obstacle_weight=30.0,
-    terrain_weight=12.5,
-    heading_weight=1.0,
+    grid_half_size=5,
+    goal_weight=5.0,
+    obstacle_weight=2.0,
+    terrain_weight=1.25,
+    heading_weight=0.5,
     d_safe=config.d_safe
 )
 
@@ -162,7 +162,7 @@ rollout_snapshots = {}  # step -> (expected_traj, sample_trajs), sampled every 2
 terrain_snapshots = {}  # step -> (terrain_xy, terrain_elev, sensed_slope, sensed_center), sampled every step
 
 x = x0.copy()
-num_steps = 500
+num_steps = 700
 num_safe = 0
 goal_reached = False
 

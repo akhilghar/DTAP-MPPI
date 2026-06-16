@@ -30,7 +30,6 @@ class MPPIConfig:
     horizon: int = 30
     dt: float = 0.1
 
-    # Cost Parameters
     Q: np.ndarray = None  # State cost matrix
     R: np.ndarray = None  # Control cost matrix
     Qf: np.ndarray = None  # Terminal state cost matrix
@@ -52,11 +51,11 @@ class MPPIConfig:
     noise_sigma: np.ndarray = None
 
     # Covariance adaptation parameters
-    covariance_max_scale: float = 7.0   # maximum multiplier on base sigma when in danger
-    covariance_decay: float = 0.7       # per-step decay rate back toward base when recovering
+    covariance_max_scale: float = 10.0   # maximum multiplier on base sigma when in danger
+    covariance_decay: float = 0.7        # per-step decay rate back toward base when recovering
 
     # Probabilistic obstacle prediction parameters
-    obs_pred_rollouts: int = 40          # MC rollouts for GPU obstacle trajectory prediction
+    obs_pred_rollouts: int = 20          # MC rollouts for GPU obstacle trajectory prediction
     obs_direction_change_prob: float = 0.01
     max_obstacles: int = 20              # capacity for preallocated obstacle GPU buffers
 
@@ -129,10 +128,6 @@ class MPPITerraneous:
         self.dem = dem
 
         self._allocate_gpu_memory()
-
-    # ------------------------------------------------------------------
-    # GPU memory management
-    # ------------------------------------------------------------------
 
     def _allocate_gpu_memory(self):
         N   = self.config.num_samples
@@ -391,7 +386,7 @@ class MPPITerraneous:
                     1.0 + (self.config.covariance_max_scale - 1.0) * danger**2
                 )
                 self.current_covariance = np.maximum(self.current_covariance, target)
-                self.config.covariance_decay = 0.3 + 0.6 * danger**3
+                self.config.covariance_decay = 0.3 + 0.6*danger
             else:
                 self.current_covariance = (
                     self.config.covariance_decay * self.current_covariance

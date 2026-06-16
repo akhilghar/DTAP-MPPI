@@ -20,7 +20,7 @@ goalpos = np.array([20.0, 20.0])
 
 # Add moving circular obstacles
 rng = np.random.default_rng(seed=42)
-for i in range(0,30):
+for i in range(0,66):
     env.add_circle_obstacle(
         position=[np.random.randint(-4+1, 24-1), np.random.randint(1.0, 22.0)], 
         radius=0.3+0.4*np.random.rand()
