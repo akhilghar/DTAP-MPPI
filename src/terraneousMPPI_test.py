@@ -15,27 +15,37 @@ from terrain_estimators.traversability_BCM import TraversabilityClassifier, _com
 # Setup Environment
 # ============================================================================
 
-env_scale = 2.0
+env_scale = 1.0
+playstyle = "static"  # "static" or "dynamic"
 env = TerraneousEnv(bounds=(-2*env_scale, 12*env_scale, -2*env_scale, 12*env_scale), robot_radius=0.3)
 env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
-rng = np.random.default_rng(seed=42)
-for i in range(0,7):
-    env.add_obstacle(
-        Obstacle(position=[np.random.randint(2.0, 11.0*env_scale), np.random.randint(2.0, 11.0*env_scale)], 
-                 radius=(0.3+0.2*np.random.rand())*env_scale,
-                 velocity=[2.0*np.random.rand()-1.0, 2.0*np.random.rand()-1.0],
-                 mode=ObstacleMode.AVOIDANT)
-    )
+rng = np.random.default_rng()
+if playstyle == "dynamic":
+    for i in range(0,7):
+        env.add_obstacle(
+            Obstacle(position=[rng.uniform(2.0, 11.0*env_scale), rng.uniform(2.0, 11.0*env_scale)], 
+                    radius=(0.3+0.2*rng.random())*env_scale,
+                    velocity=[2.0*rng.random()-1.0, 2.0*rng.random()-1.0],
+                    mode=ObstacleMode.AVOIDANT)
+        )
+else:
+    for i in range(0,12):
+        env.add_obstacle(
+            Obstacle(position=[rng.uniform(2.0, 11.0*env_scale), rng.uniform(2.0, 11.0*env_scale)], 
+                    radius=(0.3+0.2*rng.random())*env_scale,
+                    velocity=[0.0, 0.0],
+                    mode=ObstacleMode.STATIC)
+        )
 
 # Add static circular obstacles
-env.add_obstacle(
+"""env.add_obstacle(
     Obstacle(position=[5.0*env_scale, 4.0*env_scale], 
              radius=2.0*env_scale,
              velocity=[0.0, 0.0],
              mode=ObstacleMode.STATIC)
-)
+)"""
 
 #print("Environment Obstacles: ")
 #for obs in env.obstacles:
@@ -66,7 +76,7 @@ if state_dim == 4:
     ctrl_label_1 = "Acceleration"
     ctrl_label_2 = "Steering Angle"
     x0 = np.array([0.0, 0.0, np.pi/2, 0.0])
-    x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])
+    x_goal = np.array([0.0, 20.0, np.pi/2, 0.0])*env_scale
 
 else:
     Q_mod=np.diag([10.0, 10.0, 0.75, 1.0, 2.0])
@@ -78,7 +88,7 @@ else:
     ctrl_label_1 = "Left Wheel Velocity"
     ctrl_label_2 = "Right Wheel Velocity"
     x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
-    x_goal = np.array([20.0, 20.0, 0.0, 0.0, 0.0])
+    x_goal = np.array([10.0, 10.0, 0.0, 0.0, 0.0])*env_scale
 
 
 config = MPPIConfig(
@@ -91,7 +101,7 @@ config = MPPIConfig(
     Qf=Qf_mod,
     R=R_mod,
 
-    Q_obs=100.0,
+    Q_obs=50.0,
     d_safe=env.robot_radius + 0.1,
 
     dynamics_params=np.array([2*env.robot_radius, 0.01]),
@@ -140,7 +150,7 @@ waypoint_selector = WaypointSelector(
     grid_resolution=0.5,
     grid_half_size=5,
     goal_weight=5.0,
-    obstacle_weight=2.0,
+    obstacle_weight=5.0,
     terrain_weight=1.25,
     heading_weight=0.5,
     d_safe=config.d_safe
@@ -325,6 +335,31 @@ print(f"Safe Trajectory Rate: {num_safe/len(trajectory):.2f}")
 print(f"Total Simulation Time: {sim_end_time - sim_start_time:.2f} seconds")
 print(f"Goal Reached: {goal_reached}")
 cov_log = np.array(cov_log)
+
+# ============================================================================
+# Record run for PyBullet POV replay  (decoupled visualizer — see
+# src/pybulletPOV_replay.py). This only *saves* data; it does not affect the sim.
+# ============================================================================
+import os as _os
+_replay_dir = _os.path.join(_os.path.dirname(__file__), "..", "media", "replays")
+_os.makedirs(_replay_dir, exist_ok=True)
+_replay_path = _os.path.join(_replay_dir, "latest_run.npz")
+np.savez_compressed(
+    _replay_path,
+    terrain=env.terrain,
+    bounds=np.array(env.bounds, dtype=np.float32),
+    dx=np.float32(env.dx),
+    robot_radius=np.float32(env.robot_radius),
+    trajectory=trajectory,
+    obstacle_history=obstacle_history,
+    obstacle_radii=np.array([o.radius for o in env.obstacles], dtype=np.float32),
+    obstacle_modes=np.array([o.mode.value for o in env.obstacles]),
+    x_goal=x_goal.astype(np.float32),
+    cam_mounting_height=np.float32(cam.mounting_height),
+    cam_mounting_angle=np.float32(cam.mounting_angle),
+    cam_max_range=np.float32(cam.max_range),
+)
+print(f"Saved run for PyBullet POV replay: {_replay_path}")
 
 # ============================================================================
 # Visualization
@@ -564,251 +599,6 @@ plt.tight_layout()
 overlay_filename = f'./media/Visualizations/costmaps/traversability_overlay_{t_fin:.2f}.png'
 plt.savefig(overlay_filename, dpi=150)
 print("DEM and Traversability Visualizations Saved.")
-
-# ============================================================================
-# Robot POV Visualization
-# ============================================================================
-
-from scipy.ndimage import zoom as _nd_zoom
-from PIL import Image as _PILImage, ImageDraw as _ImageDraw
-
-
-def render_robot_pov_image(robot_state, terrain, env_bounds, env_cell_size,
-                            cam_mounting_height=0.3, cam_mounting_angle_deg=5.0,
-                            cam_hfov_deg=90.0, cam_vfov_deg=73.74,
-                            img_w=320, img_h=240, max_range=11.0, upsample=8,
-                            point_radius=20*env.dx, goal_pos=None,
-                            trav_overlay=None, trav_observed=None,
-                            class_overlay=None):
-    # --- Upsample terrain for smoother rendering ---
-    terrain_r = _nd_zoom(terrain.astype(np.float32), upsample, order=1)
-
-    rpx, rpy = float(robot_state[0]), float(robot_state[1])
-    theta = float(robot_state[2])
-    pitch = float(robot_state[3]) if len(robot_state) > 4 else 0.0
-    roll  = float(robot_state[4]) if len(robot_state) > 4 else 0.0
-
-    xmin, xmax, ymin, ymax = env_bounds
-
-    # Ground elevation under robot
-    ix = int(np.clip((rpx - xmin) / env_cell_size, 0, terrain.shape[0] - 1))
-    iy = int(np.clip((rpy - ymin) / env_cell_size, 0, terrain.shape[1] - 1))
-    ground_z = float(terrain[ix, iy])
-    cam_pos = np.array([rpx, rpy, ground_z + cam_mounting_height], dtype=np.float64)
-
-    # --- Camera orientation in world frame ---
-    # total_pitch > 0  →  camera nose points down
-    total_pitch = np.radians(cam_mounting_angle_deg) + pitch
-
-    c_th, s_th = np.cos(theta), np.sin(theta)
-    c_p,  s_p  = np.cos(total_pitch), np.sin(total_pitch)
-    c_r,  s_r  = np.cos(roll),        np.sin(roll)
-
-    # Forward vector (world frame): heading theta, tilted down by total_pitch
-    forward = np.array([c_th * c_p, s_th * c_p, -s_p])
-    # Right vector at zero roll, then rotated by roll
-    right_0 = np.array([s_th, -c_th, 0.0])
-    right   = c_r * right_0 + s_r * np.cross(forward, right_0)
-    right  /= np.linalg.norm(right)
-    # Up = right × forward  (right-hand camera frame)
-    up = np.cross(right, forward)
-    up /= np.linalg.norm(up)
-
-    half_w = np.tan(np.radians(cam_hfov_deg) / 2.0)
-    half_h = np.tan(np.radians(cam_vfov_deg) / 2.0)
-
-    # --- Build terrain point cloud ---
-    nx_r, ny_r = terrain_r.shape
-    xs = np.linspace(xmin, xmax, nx_r)
-    ys = np.linspace(ymin, ymax, ny_r)
-    Xg, Yg = np.meshgrid(xs, ys, indexing='ij')
-
-    # Original-grid indices for each upsampled point (for traversability lookup)
-    nx_orig, ny_orig = terrain.shape
-    orig_ix_all = np.clip(np.floor((Xg.ravel() - xmin) / env_cell_size).astype(int), 0, nx_orig - 1)
-    orig_iy_all = np.clip(np.floor((Yg.ravel() - ymin) / env_cell_size).astype(int), 0, ny_orig - 1)
-
-    dxv = Xg.ravel() - cam_pos[0]
-    dyv = Yg.ravel() - cam_pos[1]
-    dzv = terrain_r.ravel() - cam_pos[2]
-
-    # Project onto camera axes
-    depth  = dxv * forward[0] + dyv * forward[1] + dzv * forward[2]
-    r_comp = dxv * right[0]   + dyv * right[1]   + dzv * right[2]
-    u_comp = dxv * up[0]      + dyv * up[1]       + dzv * up[2]
-
-    # Keep only points in front of camera and within sensor range
-    valid = (depth > 0.05) & (depth <= max_range)
-    depth_v = depth[valid];  r_v = r_comp[valid]
-    u_v     = u_comp[valid]; elev_v = terrain_r.ravel()[valid]
-    orig_ix_v = orig_ix_all[valid]
-    orig_iy_v = orig_iy_all[valid]
-
-    # Normalised device coordinates: [-1, +1]
-    u_ndc = r_v / (depth_v * half_w)   # -1=left,  +1=right
-    v_ndc = u_v / (depth_v * half_h)   # -1=below, +1=above
-
-    in_fov = (np.abs(u_ndc) <= 1.0) & (np.abs(v_ndc) <= 1.0)
-    depth_v   = depth_v[in_fov];   u_ndc     = u_ndc[in_fov]
-    v_ndc     = v_ndc[in_fov];     elev_v    = elev_v[in_fov]
-    orig_ix_v = orig_ix_v[in_fov]; orig_iy_v = orig_iy_v[in_fov]
-
-    # Raster coordinates
-    col = np.clip(((u_ndc + 1.0) / 2.0 * (img_w - 1)).astype(int), 0, img_w - 1)
-    row = np.clip(((1.0 - (v_ndc + 1.0) / 2.0) * (img_h - 1)).astype(int), 0, img_h - 1)
-
-    # Far-to-near sort → near points overwrite far ones via numpy assignment
-    order     = np.argsort(depth_v)[::-1]
-    col       = col[order];       row       = row[order]
-    depth_v   = depth_v[order];   elev_v    = elev_v[order]
-    orig_ix_v = orig_ix_v[order]; orig_iy_v = orig_iy_v[order]
-
-    # --- Colour: traversability tri-color (green/yellow/red) + depth fog ---
-    fog     = np.clip(depth_v / max_range, 0, 1)[:, np.newaxis]
-    fog_col = np.array([[155, 165, 175]], dtype=np.float32)
-
-    if class_overlay is not None:
-        cls = class_overlay[orig_ix_v, orig_iy_v]   # -1=unobserved, 0=traversable, 1=caution, 2=non-traversable
-        rgb = np.zeros((len(cls), 3), dtype=np.float32)
-        rgb[cls < 0]  = [140.0, 140.0, 140.0]   # unobserved → gray
-        rgb[cls == 0] = [0.0,   200.0,   0.0]    # traversable → green
-        rgb[cls == 1] = [255.0, 220.0,   0.0]    # caution → yellow
-        rgb[cls >= 2] = [255.0,   0.0,   0.0]    # non-traversable → red
-        rgb = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
-    elif trav_overlay is not None and trav_observed is not None:
-        scores = trav_overlay[orig_ix_v, orig_iy_v]
-        obs    = trav_observed[orig_ix_v, orig_iy_v]
-        rgb    = np.zeros((len(scores), 3), dtype=np.float32)
-
-        YELLOW_THR = 0.40
-        RED_THR    = 0.80
-
-        rgb[~obs] = [140.0, 140.0, 140.0]
-
-        low = obs & (scores <= YELLOW_THR)
-        t_low = scores[low] / YELLOW_THR
-        rgb[low, 0] = t_low * 255.0
-        rgb[low, 1] = 200.0 + t_low * 20.0
-        rgb[low, 2] = 0.0
-
-        mid = obs & (scores > YELLOW_THR) & (scores <= RED_THR)
-        t_mid = (scores[mid] - YELLOW_THR) / (RED_THR - YELLOW_THR)
-        rgb[mid, 0] = 255.0
-        rgb[mid, 1] = (1.0 - t_mid) * 220.0
-        rgb[mid, 2] = 0.0
-
-        rgb[obs & (scores > RED_THR)] = [255.0, 0.0, 0.0]
-        rgb = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
-    else:
-        # Fallback: elevation colormap
-        t_min, t_max = terrain.min(), terrain.max()
-        norm_e = np.clip((elev_v - t_min) / (t_max - t_min + 1e-8), 0, 1)
-        cmap   = plt.get_cmap('terrain')
-        rgb    = (cmap(norm_e)[:, :3] * 255).astype(np.float32)
-        rgb    = ((1.0 - fog) * rgb + fog * fog_col).astype(np.uint8)
-
-    # --- Sky gradient background ---
-    img     = np.zeros((img_h, img_w, 3), dtype=np.uint8)
-    sky_top = np.array([50, 100, 170], dtype=np.float32)
-    sky_bot = np.array([165, 200, 235], dtype=np.float32)
-    rows_idx   = np.arange(img_h, dtype=np.float32)[:, np.newaxis, np.newaxis]  # (H, 1, 1)
-    t_sky      = rows_idx / max(img_h - 1, 1)
-    img[:, :] = ((1.0 - t_sky) * sky_top + t_sky * sky_bot).astype(np.uint8)  # (H, 1, 3) → (H, W, 3)
-
-    # Paint terrain points as filled squares of size (2*point_radius+1)
-    for dr in range(-point_radius, point_radius + 1):
-        for dc in range(-point_radius, point_radius + 1):
-            rr = np.clip(row + dr, 0, img_h - 1)
-            cc = np.clip(col + dc, 0, img_w - 1)
-            img[rr, cc] = rgb
-
-    # --- Goal beacon: project goal world position into screen space ---
-    if goal_pos is not None:
-        gx, gy = float(goal_pos[0]), float(goal_pos[1])
-        gix = int(np.clip((gx - xmin) / env_cell_size, 0, terrain.shape[0] - 1))
-        giy = int(np.clip((gy - ymin) / env_cell_size, 0, terrain.shape[1] - 1))
-        gz  = float(terrain[gix, giy])
-
-        gdx = gx - cam_pos[0];  gdy = gy - cam_pos[1];  gdz = gz - cam_pos[2]
-        g_depth = gdx * forward[0] + gdy * forward[1] + gdz * forward[2]
-        if g_depth > 0.05:
-            g_r   = gdx * right[0] + gdy * right[1] + gdz * right[2]
-            g_u   = gdx * up[0]    + gdy * up[1]    + gdz * up[2]
-            g_u_ndc = g_r / (g_depth * half_w)
-            g_v_ndc = g_u / (g_depth * half_h)
-            if abs(g_u_ndc) <= 1.0 and abs(g_v_ndc) <= 1.0:
-                gc = int((g_u_ndc + 1.0) / 2.0 * (img_w - 1))
-                gr = int((1.0 - (g_v_ndc + 1.0) / 2.0) * (img_h - 1))
-                beacon_r = max(6, int(18.0 / max(g_depth, 1.0)))
-                rr_idx, cc_idx = np.ogrid[-beacon_r:beacon_r+1, -beacon_r:beacon_r+1]
-                circle_mask = rr_idx**2 + cc_idx**2 <= beacon_r**2
-                ring_mask   = rr_idx**2 + cc_idx**2 <= (beacon_r - 2)**2
-                for dr in range(-beacon_r, beacon_r + 1):
-                    for dc in range(-beacon_r, beacon_r + 1):
-                        if circle_mask[dr + beacon_r, dc + beacon_r]:
-                            pr = np.clip(gr + dr, 0, img_h - 1)
-                            pc = np.clip(gc + dc, 0, img_w - 1)
-                            if ring_mask[dr + beacon_r, dc + beacon_r]:
-                                img[pr, pc] = [0, 210, 60]   # green fill
-                            else:
-                                img[pr, pc] = [255, 255, 255] # white ring
-
-    return img
-
-if env.dx >= 0.05: # Only render POV if environment is not too slow (smaller cell sizes lead to large images and very long rendering times)
-    print("Rendering Robot POV GIF...")
-    pov_gif_path = f"./media/GIFs/POV/mppi_pov_{model_name}_{t_fin:.2f}_prob.gif"
-
-    cam_hfov_deg = float(np.degrees(cam.horizontal_fov))
-    cam_vfov_deg = float(np.degrees(cam.vertical_fov))
-
-    pov_frames = []
-    for i, state in enumerate(trajectory):
-        frame_img = render_robot_pov_image(
-            robot_state=state,
-            terrain=env.terrain,
-            env_bounds=env.bounds,
-            env_cell_size=env_cell_size,
-            cam_mounting_height=cam.mounting_height,
-            cam_mounting_angle_deg=cam.mounting_angle,
-            cam_hfov_deg=cam_hfov_deg,
-            cam_vfov_deg=cam_vfov_deg,
-            img_w=320, img_h=240,
-            max_range=cam.max_range,
-            upsample=8,
-            point_radius=2,
-            goal_pos=x_goal[:2],
-            trav_overlay=dem.traversability_overlay,
-            trav_observed=dem.observed,
-            class_overlay=dem.class_overlay,
-        )
-
-        # HUD overlay
-        pil  = _PILImage.fromarray(frame_img)
-        draw = _ImageDraw.Draw(pil)
-        rpx, rpy    = float(state[0]), float(state[1])
-        heading_deg = float(np.degrees(state[2])) % 360.0
-        dist_goal   = float(np.linalg.norm(state[:2] - x_goal[:2]))
-        pitch_deg   = float(np.degrees(state[3])) if len(state) > 4 else 0.0
-        roll_deg    = float(np.degrees(state[4])) if len(state) > 4 else 0.0
-        draw.text((6,  4), f"Step {i:03d}",                  fill=(255, 255, 200))
-        draw.text((6, 18), f"Pos  ({rpx:.1f}, {rpy:.1f})",  fill=(255, 255, 200))
-        draw.text((6, 32), f"Hdg  {heading_deg:.1f}\u00b0",  fill=(255, 255, 200))
-        draw.text((6, 46), f"Pitch {pitch_deg:.1f}\u00b0",   fill=(255, 255, 200))
-        draw.text((6, 60), f"Roll  {roll_deg:.1f}\u00b0",    fill=(255, 255, 200))
-        draw.text((6, 74), f"Goal {dist_goal:.1f} m",        fill=(255, 255, 200))
-        pov_frames.append(pil)
-
-    duration_ms = max(20, int(config.dt * 1000))
-    pov_frames[0].save(
-        pov_gif_path,
-        save_all=True,
-        append_images=pov_frames[1:],
-        duration=duration_ms,
-        loop=0,
-        optimize=False,
-    )
-    print(f"Saved Robot POV GIF: {pov_gif_path}")
 
 # Free GPU buffers to ensure clean exit and avoid memory leaks
 mppi.free_gpu_buffers()

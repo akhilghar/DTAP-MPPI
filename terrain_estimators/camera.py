@@ -212,6 +212,13 @@ class Camera:
         points = point_cloud['points']
         depths = point_cloud['depths']
 
+        if points.size == 0:
+            return (
+                np.zeros(0, dtype=np.float32),
+                np.zeros((0, 2), dtype=np.float32),
+                np.zeros(0, dtype=np.int8),
+            )
+
         xmin, ymin = points[:, 0].min(), points[:, 1].min()
         n_cols = max(1, int(np.ceil((points[:, 0].max() - xmin) / cell_size)))
         n_rows = max(1, int(np.ceil((points[:, 1].max() - ymin) / cell_size)))
