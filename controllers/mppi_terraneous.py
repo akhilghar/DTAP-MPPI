@@ -59,6 +59,10 @@ class MPPIConfig:
     obs_direction_change_prob: float = 0.01
     max_obstacles: int = 20              # capacity for preallocated obstacle GPU buffers
 
+    # Probabilistic collision-risk safety
+    risk_epsilon: float = 0.05           # is_safe := P(collision) < risk_epsilon
+    risk_rollouts: int = 100             # MC obstacle futures used to estimate P(collision)
+
     def __post_init__(self):
         if self.Q is None:
             self.Q = np.eye(self.state_dim)
@@ -126,6 +130,8 @@ class MPPITerraneous:
         self._obs_rng_n_states = 0
 
         self.dem = dem
+
+        self.last_collision_prob = 0.0   # P(collision) of the last planned path
 
         self._allocate_gpu_memory()
 
@@ -356,9 +362,9 @@ class MPPITerraneous:
         is_safe = True
 
         if require_safe:
-            safe_mask     = min_dists >= self.config.d_safe
+            safe_mask = min_dists >= self.config.d_safe
             safe_fraction = float(np.mean(safe_mask))
-            danger        = 1.0 - safe_fraction
+            danger = 1.0 - safe_fraction
 
             if safe_fraction == 0.0:
                 # Fully trapped: maximise exploration and return best-clearance control.
@@ -463,28 +469,45 @@ class MPPITerraneous:
         )
         return elev
 
+    def collision_probability(self, robot_traj: np.ndarray) -> float:
+        obstacles = self.environment.obstacles
+        if robot_traj is None or len(obstacles) == 0:
+            return 0.0
+
+        H = self.config.horizon
+        # Predict obstacle futures WITH avoidance of the robot's planned path so the
+        # risk estimate reflects the obstacles' actual (avoidant) policy.
+        obs = self.environment.predict_obstacle_trajectories(
+            H, self.config.dt, num_rollouts=self.config.risk_rollouts,
+            direction_change_prob=self.config.obs_direction_change_prob,
+            robot_traj=robot_traj[1:, :2],
+        )  # (R, N_obs, H, 2)
+        if obs.shape[1] == 0:
+            return 0.0
+
+        radii = np.array([o.radius for o in obstacles], dtype=np.float32)   # (N,)
+        # align robot post-step positions (t=1..H) with obstacle predictions (0..H-1)
+        Hc = min(robot_traj.shape[0] - 1, obs.shape[2])
+        p = robot_traj[1:1 + Hc, :2]                                        # (Hc, 2)
+
+        diff = obs[:, :, :Hc, :] - p[np.newaxis, np.newaxis, :, :]          # (R, N, Hc, 2)
+        dist = np.sqrt((diff ** 2).sum(axis=-1))                            # (R, N, Hc)
+        thresh = radii[np.newaxis, :, np.newaxis] + self.environment.robot_radius + self.config.d_safe
+        collide_per_rollout = np.any(dist < thresh, axis=(1, 2))           # (R,)
+        return float(collide_per_rollout.mean())
+
     def get_control(self, x0: np.ndarray, x_goal: np.ndarray, require_safe: bool = True):
         u_opt, trajectory, is_safe = self.solve(
             x0, x_goal, return_trajectory=True, require_safe=require_safe
         )
-
-        # Double-check expected trajectory clearance if available
+        
         if require_safe and trajectory is not None:
-            for t in range(trajectory.shape[0]):
-                pos = trajectory[t, :2]
-                dist = self.environment.get_nearest_obstacle_distance(pos)
-                if dist < self.config.d_safe:
-                    is_safe = False
-                    break
+            self.last_collision_prob = self.collision_probability(trajectory)
+            is_safe = is_safe and (self.last_collision_prob < self.config.risk_epsilon)
 
         return u_opt, is_safe
 
     def get_rollout_snapshot(self, n: int = 5):
-        """Return (expected_traj, sample_trajs) from the most recent solve.
-
-        expected_traj : (H+1, S) weighted-mean (selected) trajectory.
-        sample_trajs  : (n, H+1, S) array of n random sample rollouts.
-        """
         indices = np.random.choice(self.config.num_samples, size=n, replace=False)
         sample_trajs = np.stack([self.d_trajectories[i].copy_to_host() for i in indices])
         return self._last_expected_traj, sample_trajs

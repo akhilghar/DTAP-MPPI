@@ -1,6 +1,62 @@
 import numpy as np
+import math
 from enum import Enum
 from typing import List, Tuple, Optional
+from numba import njit
+
+
+@njit(cache=True)
+def _predict_obstacles_core(base_pos, base_vel, radii, robot_xy,
+                            is_avoid, a_radius, a_strength, o_speed, o_tau,
+                            xmin, xmax, ymin, ymax, horizon, dt,
+                            dir_change_prob, R, use_avoid):
+    N = base_pos.shape[0]
+    n_rp = robot_xy.shape[0]
+    out = np.zeros((R, N, horizon, 2), dtype=np.float32)
+    for r in range(R):
+        for n in range(N):
+            px = base_pos[n, 0]; py = base_pos[n, 1]
+            vx = base_vel[n, 0]; vy = base_vel[n, 1]
+            spd = math.sqrt(vx * vx + vy * vy)   # re-heading magnitude (initial speed)
+            rad = radii[n]
+            for k in range(horizon):
+                active = False
+                if use_avoid and is_avoid[n]:
+                    rk = k if k < n_rp else n_rp - 1
+                    dx = robot_xy[rk, 0] - px
+                    dy = robot_xy[rk, 1] - py
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if 1e-6 < dist < a_radius[n]:
+                        active = True
+                        awx = -dx / dist; awy = -dy / dist          # away from robot
+                        rep = a_strength[n] / (dist * dist + 1e-3)
+                        cap = o_speed[n] * 3.0
+                        if rep > cap:
+                            rep = cap
+                        w = 1.0 - dist / a_radius[n]
+                        vmag = math.sqrt(vx * vx + vy * vy) + 1e-9
+                        hx = vx / vmag; hy = vy / vmag
+                        ddx = w * rep * awx + (1.0 - w) * o_speed[n] * hx
+                        ddy = w * rep * awy + (1.0 - w) * o_speed[n] * hy
+                        dn = math.sqrt(ddx * ddx + ddy * ddy)
+                        if dn > 1e-6:
+                            ddx = ddx / dn * o_speed[n]
+                            ddy = ddy / dn * o_speed[n]
+                            st = dt / o_tau[n]
+                            vx += (ddx - vx) * st
+                            vy += (ddy - vy) * st
+                if (not active) and (np.random.random() < dir_change_prob):
+                    ang = np.random.uniform(0.0, 2.0 * math.pi)
+                    vx = math.cos(ang) * spd; vy = math.sin(ang) * spd
+                px += vx * dt; py += vy * dt
+                if px - rad < xmin or px + rad > xmax:
+                    vx = -vx
+                    px = min(max(px, xmin + rad), xmax - rad)
+                if py - rad < ymin or py + rad > ymax:
+                    vy = -vy
+                    py = min(max(py, ymin + rad), ymax - rad)
+                out[r, n, k, 0] = px; out[r, n, k, 1] = py
+    return out
 
 
 class ObstacleMode(Enum):
@@ -323,6 +379,7 @@ class TerraneousEnv:
         dt: float,
         num_rollouts: int = 50,
         direction_change_prob: float = 0.05,
+        robot_traj: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         N = len(self.obstacles)
         R = num_rollouts
@@ -330,41 +387,26 @@ class TerraneousEnv:
         if N == 0:
             return np.zeros((R, 0, horizon, 2), dtype=np.float32)
 
-        base_pos = np.array([obs.position.copy() for obs in self.obstacles], dtype=np.float64)  # (N, 2)
-        base_vel = np.array([obs.velocity.copy() for obs in self.obstacles], dtype=np.float64)  # (N, 2)
-        radii    = np.array([obs.radius           for obs in self.obstacles], dtype=np.float64)  # (N,)
+        base_pos = np.array([o.position for o in self.obstacles], dtype=np.float64)   # (N, 2)
+        base_vel = np.array([o.velocity for o in self.obstacles], dtype=np.float64)   # (N, 2)
+        radii    = np.array([o.radius   for o in self.obstacles], dtype=np.float64)   # (N,)
+        is_avoid   = np.array([o.mode == ObstacleMode.AVOIDANT for o in self.obstacles])
+        a_radius   = np.array([o.avoidance_radius   for o in self.obstacles], dtype=np.float64)
+        a_strength = np.array([o.avoidance_strength for o in self.obstacles], dtype=np.float64)
+        o_speed    = np.array([o.speed              for o in self.obstacles], dtype=np.float64)
+        o_tau      = np.array([max(o.tau, 1e-2)     for o in self.obstacles], dtype=np.float64)
+
+        use_avoid = robot_traj is not None
+        robot_xy = (np.ascontiguousarray(robot_traj, dtype=np.float64)[:, :2]
+                    if use_avoid else np.zeros((1, 2), dtype=np.float64))
 
         xmin, xmax, ymin, ymax = self.bounds
-
-        # Broadcast starting state across all rollouts: (R, N, 2)
-        pos = np.tile(base_pos[np.newaxis], (R, 1, 1))   # (R, N, 2)
-        vel = np.tile(base_vel[np.newaxis], (R, 1, 1))   # (R, N, 2)
-        spd = np.linalg.norm(vel, axis=2)                # (R, N)
-
-        all_trajs = np.zeros((R, N, horizon, 2), dtype=np.float32)
-
-        for k in range(horizon):
-            # Stochastic direction changes — each (rollout, obstacle) pair independently
-            change = np.random.rand(R, N) < direction_change_prob
-            angles = np.random.uniform(0, 2 * np.pi, (R, N))
-            new_vx = np.cos(angles) * spd
-            new_vy = np.sin(angles) * spd
-            vel[:, :, 0] = np.where(change, new_vx, vel[:, :, 0])
-            vel[:, :, 1] = np.where(change, new_vy, vel[:, :, 1])
-
-            pos += vel * dt
-
-            # Wall bouncing — vectorized over all rollouts and obstacles
-            hit_x = (pos[:, :, 0] - radii < xmin) | (pos[:, :, 0] + radii > xmax)
-            hit_y = (pos[:, :, 1] - radii < ymin) | (pos[:, :, 1] + radii > ymax)
-            vel[:, :, 0] = np.where(hit_x, -vel[:, :, 0], vel[:, :, 0])
-            vel[:, :, 1] = np.where(hit_y, -vel[:, :, 1], vel[:, :, 1])
-            pos[:, :, 0] = np.clip(pos[:, :, 0], xmin + radii, xmax - radii)
-            pos[:, :, 1] = np.clip(pos[:, :, 1], ymin + radii, ymax - radii)
-
-            all_trajs[:, :, k, :] = pos          # store all R positions at step k
-
-        return all_trajs
+        return _predict_obstacles_core(
+            base_pos, base_vel, radii, robot_xy,
+            is_avoid, a_radius, a_strength, o_speed, o_tau,
+            float(xmin), float(xmax), float(ymin), float(ymax),
+            int(horizon), float(dt), float(direction_change_prob), int(R), bool(use_avoid),
+        )
 
     def generate_terrain(self, flat: bool) -> None:
         from scipy.ndimage import gaussian_filter

@@ -16,7 +16,7 @@ from terrain_estimators.traversability_BCM import TraversabilityClassifier, _com
 # ============================================================================
 
 env_scale = 1.0
-playstyle = "static"  # "static" or "dynamic"
+playstyle = "dynamic"  # "static" or "dynamic"
 env = TerraneousEnv(bounds=(-2*env_scale, 12*env_scale, -2*env_scale, 12*env_scale), robot_radius=0.3)
 env.generate_terrain(flat=False)
 
@@ -31,7 +31,7 @@ if playstyle == "dynamic":
                     mode=ObstacleMode.AVOIDANT)
         )
 else:
-    for i in range(0,12):
+    for i in range(0,7):
         env.add_obstacle(
             Obstacle(position=[rng.uniform(2.0, 11.0*env_scale), rng.uniform(2.0, 11.0*env_scale)], 
                     radius=(0.3+0.2*rng.random())*env_scale,
@@ -101,7 +101,7 @@ config = MPPIConfig(
     Qf=Qf_mod,
     R=R_mod,
 
-    Q_obs=50.0,
+    Q_obs=90.0,
     d_safe=env.robot_radius + 0.1,
 
     dynamics_params=np.array([2*env.robot_radius, 0.01]),
@@ -149,7 +149,7 @@ dem = DEMBuilder(origin=env_origin, cell_size=env_cell_size, grid_size=env_grid_
 waypoint_selector = WaypointSelector(
     grid_resolution=0.5,
     grid_half_size=5,
-    goal_weight=5.0,
+    goal_weight=7.5,
     obstacle_weight=5.0,
     terrain_weight=1.25,
     heading_weight=0.5,
