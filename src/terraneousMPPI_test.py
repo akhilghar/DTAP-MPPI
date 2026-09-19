@@ -15,33 +15,33 @@ from terrain_estimators.traversability_BCM import TraversabilityClassifier, _com
 # Setup Environment
 # ============================================================================
 
-env_scale = 1.0
-playstyle = "dynamic"  # "static" or "dynamic"
+env_scale = 2.0
+playstyle = "static"  # "static" or "dynamic"
 env = TerraneousEnv(bounds=(-2*env_scale, 12*env_scale, -2*env_scale, 12*env_scale), robot_radius=0.3)
 env.generate_terrain(flat=False)
 
 # Add moving circular obstacles
 rng = np.random.default_rng()
 if playstyle == "dynamic":
-    for i in range(0,7):
+    for i in range(0,20):
         env.add_obstacle(
             Obstacle(position=[rng.uniform(2.0, 11.0*env_scale), rng.uniform(2.0, 11.0*env_scale)], 
                     radius=(0.3+0.2*rng.random())*env_scale,
                     velocity=[2.0*rng.random()-1.0, 2.0*rng.random()-1.0],
-                    mode=ObstacleMode.AVOIDANT)
+                    mode=ObstacleMode.APATHETIC)
         )
 else:
-    for i in range(0,7):
+    for i in range(0,40):
         env.add_obstacle(
             Obstacle(position=[rng.uniform(2.0, 11.0*env_scale), rng.uniform(2.0, 11.0*env_scale)], 
-                    radius=(0.3+0.2*rng.random())*env_scale,
+                    radius=(0.3+0.3*rng.random())*env_scale,
                     velocity=[0.0, 0.0],
                     mode=ObstacleMode.STATIC)
         )
 
 # Add static circular obstacles
 """env.add_obstacle(
-    Obstacle(position=[5.0*env_scale, 4.0*env_scale], 
+    Obstacle(position=[5.0*env_scale, 5.0*env_scale], 
              radius=2.0*env_scale,
              velocity=[0.0, 0.0],
              mode=ObstacleMode.STATIC)
@@ -82,7 +82,7 @@ else:
     Q_mod=np.diag([10.0, 10.0, 0.75, 1.0, 2.0])
     Qf_mod=np.diag([100.0, 100.0, 1.0, 10.0, 10.0])
     R_mod = np.eye(control_dim)
-    umin_mod = np.array([-3.0, -3.0])
+    umin_mod = np.array([0.0, 0.0])
     umax_mod = np.array([3.0, 3.0])
     noise_mod = np.array([0.8, 0.8])
     ctrl_label_1 = "Left Wheel Velocity"
@@ -92,7 +92,7 @@ else:
 
 
 config = MPPIConfig(
-    num_samples=8500,
+    num_samples=5000,
     horizon=40,
     dt=0.05,
     lambda_=30.0, # increase temperature for smoother trajectory
@@ -151,7 +151,7 @@ waypoint_selector = WaypointSelector(
     grid_half_size=5,
     goal_weight=7.5,
     obstacle_weight=5.0,
-    terrain_weight=1.25,
+    terrain_weight=3.0,
     heading_weight=0.5,
     d_safe=config.d_safe
 )
@@ -172,7 +172,7 @@ rollout_snapshots = {}  # step -> (expected_traj, sample_trajs), sampled every 2
 terrain_snapshots = {}  # step -> (terrain_xy, terrain_elev, sensed_slope, sensed_center), sampled every step
 
 x = x0.copy()
-num_steps = 700
+num_steps = 500*int(env_scale)
 num_safe = 0
 goal_reached = False
 

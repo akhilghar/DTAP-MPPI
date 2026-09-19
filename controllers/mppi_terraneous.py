@@ -55,9 +55,9 @@ class MPPIConfig:
     covariance_decay: float = 0.7        # per-step decay rate back toward base when recovering
 
     # Probabilistic obstacle prediction parameters
-    obs_pred_rollouts: int = 20          # MC rollouts for GPU obstacle trajectory prediction
+    obs_pred_rollouts: int = 10          # MC rollouts for GPU obstacle trajectory prediction
     obs_direction_change_prob: float = 0.01
-    max_obstacles: int = 20              # capacity for preallocated obstacle GPU buffers
+    max_obstacles: int = 40              # capacity for preallocated obstacle GPU buffers
 
     # Probabilistic collision-risk safety
     risk_epsilon: float = 0.05           # is_safe := P(collision) < risk_epsilon
